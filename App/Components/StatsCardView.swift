@@ -180,18 +180,18 @@ struct StatsCardView: View {
 
     // MARK: - Formatting
 
-    private func formatSpeed(_ bps: Int) -> String {
+    private func formatSpeed(_ bps: Int64) -> String {
         let bcf = ByteCountFormatter()
         bcf.countStyle = .binary
         bcf.allowedUnits = [.useKB, .useMB, .useGB]
-        return bcf.string(fromByteCount: Int64(bps)) + "/s"
+        return bcf.string(fromByteCount: bps) + "/s"
     }
 
-    private func formatBytes(_ bytes: Int) -> String {
+    private func formatBytes(_ bytes: Int64) -> String {
         let bcf = ByteCountFormatter()
         bcf.countStyle = .binary
         bcf.allowedUnits = [.useKB, .useMB, .useGB]
-        return bcf.string(fromByteCount: Int64(bytes))
+        return bcf.string(fromByteCount: bytes)
     }
 
     private func formatDuration(_ secs: TimeInterval) -> String {

@@ -56,6 +56,18 @@ Sample response:
      - Type: **Plaintext**
      - Name: `VULTR_INSTANCE_ID`
      - Value: `8ec935f7-32b4-4b0c-83da-b56ecbc082af`
+   - *(Optional, recommended)* **Add → Secret**
+     - Name: `CLIENT_SECRET`
+     - Value: any long random string (e.g. `openssl rand -hex 32`).
+       When set, the Worker requires `Authorization: Bearer <CLIENT_SECRET>`
+       on every request — blocks anonymous traffic that would otherwise
+       force a Vultr API call (DoS amplification). The iOS app reads the
+       same value from the `QuotaClientSecret` Info.plist key.
+   - *(Optional)* **Add → Variable**
+     - Name: `ALLOWED_ORIGIN`
+     - Value: `null` for production. iOS NSURLSession does not send an
+       Origin header so this never affects the app, but it stops random
+       browsers / sites from reading the response. Leave unset for `*`.
 
    Click **Deploy** again so the new env is picked up.
 
@@ -73,8 +85,12 @@ Sample response:
    `{"error": "vultr_http_404", ...}` the instance ID is wrong.
 
 6. **Wire it into the iOS app**
-   In `App/QuotaStore.swift`, replace `PLACEHOLDER` in the default endpoint
-   URL with `YOURNAME` from step 5.
+   Edit `Supporting/RedFluentVPN-Info.plist` and replace the `PLACEHOLDER`
+   value of `QuotaEndpointURL` with the full URL from step 5
+   (e.g. `https://redfluent-quota.YOURNAME.workers.dev/quota`). If you
+   set `CLIENT_SECRET` on the Worker, also set `QuotaClientSecret` to the
+   same value. Until `QuotaEndpointURL` is replaced the quota card hides
+   itself instead of showing an error.
 
 ## Optional: custom route
 
@@ -118,8 +134,15 @@ Create one here: <https://my.vultr.com/settings/#settingsapi>.
 - `VULTR_API_KEY` is stored as a Worker **secret** (encrypted at rest,
   never visible after creation). Never commit it.
 - The Worker only exposes aggregate bandwidth numbers — no instance
-  metadata, no IPs, no admin actions. CORS is `*` so the dashboard can
-  hit it from any origin; if you want to lock it down, restrict to the
-  iOS app's origin (or use a shared bearer token).
+  metadata, no IPs, no admin actions. Upstream Vultr error bodies are
+  **not** echoed to clients (they can leak request IDs / partial token
+  echoes); flip `PUBLIC_DEBUG = true` in `quota.js` only for local
+  debugging.
+- CORS defaults to `*` for backward compat. Set `ALLOWED_ORIGIN=null`
+  (or a specific origin) to lock it down for production.
+- Set `CLIENT_SECRET` to require an `Authorization: Bearer …` header on
+  every request — prevents anonymous traffic from triggering the upstream
+  Vultr API call (DoS amplification). The iOS app forwards
+  `QuotaClientSecret` from Info.plist when present.
 - If the token leaks, rotate it from the Vultr dashboard and redeploy
   the secret. No app rebuild needed.

@@ -30,8 +30,10 @@ actor ClashStatsPoller {
     // server closes the connection (never), causing perpetual 1s timeouts.
     // We instead derive instantaneous Bps from successive /connections
     // uploadTotal / downloadTotal samples.
-    private var previousTotalUp: Int?
-    private var previousTotalDown: Int?
+    // Int64 — sing-box's cumulative totals routinely cross the Int32 ceiling
+    // on a multi-GB session and would silently overflow on 32-bit Int hosts.
+    private var previousTotalUp: Int64?
+    private var previousTotalDown: Int64?
     private var previousTickAt: Date?
 
     // MARK: Init
@@ -64,9 +66,13 @@ actor ClashStatsPoller {
         logger.info("ClashStatsPoller starting (every \(self.interval, privacy: .public)s)")
 
         let intervalNs = UInt64(interval * 1_000_000_000)
-        task = Task.detached(priority: .utility) { [weak self] in
+        // Plain `Task` (not `.detached`) so the loop inherits this actor's
+        // executor — every tick already needs actor isolation, so the
+        // detached variant just adds a needless hop per iteration.
+        task = Task(priority: .utility) { [weak self] in
             while !Task.isCancelled {
-                await self?.tick()
+                guard let self else { break }
+                await self.tick()
                 try? await Task.sleep(nanoseconds: intervalNs)
             }
         }
@@ -106,20 +112,29 @@ actor ClashStatsPoller {
         guard let connections else { return }
 
         let now = Date()
-        let totalUp = connections.uploadTotal ?? 0
-        let totalDown = connections.downloadTotal ?? 0
+        let totalUp: Int64 = connections.uploadTotal ?? 0
+        let totalDown: Int64 = connections.downloadTotal ?? 0
 
         // Compute instantaneous Bps from the difference between this and the
-        // previous sample. First tick has no baseline → 0.
-        var uplinkBps = 0
-        var downlinkBps = 0
+        // previous sample. On the very first tick we have no prior baseline,
+        // so fall back to the session average (totals / time-since-boot) —
+        // this gives the UI a non-zero number immediately instead of the
+        // misleading 0 B/s shown for ~2 s after every connect.
+        var uplinkBps: Int64 = 0
+        var downlinkBps: Int64 = 0
         if let prevUp = previousTotalUp,
            let prevDown = previousTotalDown,
            let prevAt = previousTickAt {
             let elapsed = now.timeIntervalSince(prevAt)
             if elapsed > 0 {
-                uplinkBps = max(0, Int(Double(totalUp - prevUp) / elapsed))
-                downlinkBps = max(0, Int(Double(totalDown - prevDown) / elapsed))
+                uplinkBps = max(0, Int64(Double(totalUp - prevUp) / elapsed))
+                downlinkBps = max(0, Int64(Double(totalDown - prevDown) / elapsed))
+            }
+        } else if let bootedAt = connectionStartedAt {
+            let sessionElapsed = now.timeIntervalSince(bootedAt)
+            if sessionElapsed > 0 {
+                uplinkBps = max(0, Int64(Double(totalUp) / sessionElapsed))
+                downlinkBps = max(0, Int64(Double(totalDown) / sessionElapsed))
             }
         }
         previousTotalUp = totalUp
@@ -189,8 +204,8 @@ actor ClashStatsPoller {
 
     private struct ConnectionsPayload: Decodable {
         let connections: [ConnectionEntry]?
-        let uploadTotal: Int?
-        let downloadTotal: Int?
+        let uploadTotal: Int64?
+        let downloadTotal: Int64?
     }
 
     private struct ConnectionEntry: Decodable {

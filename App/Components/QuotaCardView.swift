@@ -8,20 +8,30 @@ struct QuotaCardView: View {
     @EnvironmentObject private var quotaStore: QuotaStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            header
+        if !quotaStore.isConfigured {
+            // Worker not deployed yet — hide the card entirely rather than
+            // surface a misleading error from the placeholder URL.
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                header
 
-            if let snap = quotaStore.snapshot {
-                content(snap)
-            } else if quotaStore.lastError != nil {
-                errorState
-            } else {
-                loadingState
+                if let snap = quotaStore.snapshot {
+                    content(snap)
+                } else if quotaStore.lastError != nil {
+                    errorState
+                } else {
+                    loadingState
+                }
             }
-        }
-        .card()
-        .onAppear {
-            if quotaStore.snapshot == nil { quotaStore.refresh() }
+            .card()
+            .onAppear {
+                // Avoid stacking cold-start fetches: only kick a refresh if
+                // we have nothing yet AND there isn't one already in flight.
+                if quotaStore.snapshot == nil && !quotaStore.isFetching {
+                    quotaStore.refresh()
+                }
+            }
         }
     }
 

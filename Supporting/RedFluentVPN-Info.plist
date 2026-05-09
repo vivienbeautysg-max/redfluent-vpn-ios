@@ -24,6 +24,10 @@
 	<string>11</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>QuotaEndpointURL</key>
+	<string>PLACEHOLDER</string>
+	<key>QuotaClientSecret</key>
+	<string></string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

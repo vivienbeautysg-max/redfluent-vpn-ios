@@ -93,7 +93,10 @@ final class StatsStore: ObservableObject {
             if Task.isCancelled { return }
             await MainActor.run { self?.lastPingMs = result }
         }
+        // Fire-and-forget: do NOT `await task.value` here. The whole point
+        // of cancelling the prior task and storing the new one is so rapid
+        // scenePhase callers don't queue behind a slow ping — awaiting the
+        // value would re-introduce that serialization.
         pingTask = task
-        await task.value
     }
 }

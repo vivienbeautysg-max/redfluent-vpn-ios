@@ -7,10 +7,10 @@ struct StatsSnapshot: Codable, Equatable {
     var timestamp: Date
     var connected: Bool
     var connectionStartedAt: Date?
-    var uplinkBps: Int
-    var downlinkBps: Int
-    var totalUp: Int
-    var totalDown: Int
+    var uplinkBps: Int64
+    var downlinkBps: Int64
+    var totalUp: Int64
+    var totalDown: Int64
     var activeConnections: Int
     var proxyConnections: Int
     var directConnections: Int

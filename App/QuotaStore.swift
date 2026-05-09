@@ -10,7 +10,8 @@ final class QuotaStore: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var isFetching = false
 
-    private let endpoint: URL
+    private let endpoint: URL?
+    private let clientSecret: String?
     private let session: URLSession
     private var fetchTask: Task<Void, Never>?
 
@@ -18,10 +19,42 @@ final class QuotaStore: ObservableObject {
     private static let appGroupID = "group.com.redfluent.vpn"
     private static let cacheFileName = "quota.json"
 
-    // TODO: replace `PLACEHOLDER` with your Cloudflare Workers subdomain
-    // after deploying `workers/quota.js` — see `workers/README.md`.
-    init(endpoint: URL = URL(string: "https://redfluent-quota.PLACEHOLDER.workers.dev/quota")!) {
+    /// True when a real Worker endpoint has been configured via
+    /// `QuotaEndpointURL` in Info.plist. UI surfaces should hide the
+    /// quota card entirely when this is false rather than render an
+    /// error from the placeholder host.
+    var isConfigured: Bool { endpoint != nil }
+
+    /// Default initializer reads `QuotaEndpointURL` from Info.plist. If
+    /// the key is absent or still equals the literal string `PLACEHOLDER`
+    /// (the value the orchestrator stamps in pre-deploy), `endpoint` is
+    /// nil and `refresh()` becomes a no-op.
+    init() {
+        let infoEndpoint = Bundle.main.object(forInfoDictionaryKey: "QuotaEndpointURL") as? String
+        if let raw = infoEndpoint, !raw.isEmpty, raw != "PLACEHOLDER",
+           let url = URL(string: raw) {
+            self.endpoint = url
+        } else {
+            self.endpoint = nil
+        }
+        let secret = Bundle.main.object(forInfoDictionaryKey: "QuotaClientSecret") as? String
+        if let secret, !secret.isEmpty, secret != "PLACEHOLDER" {
+            self.clientSecret = secret
+        } else {
+            self.clientSecret = nil
+        }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 5
+        cfg.urlCache = URLCache(memoryCapacity: 64 * 1024, diskCapacity: 0, directory: nil)
+        self.session = URLSession(configuration: cfg)
+        loadFromDisk()
+    }
+
+    /// Test-only initializer that lets callers inject an explicit endpoint
+    /// (e.g. to point at a local mock server).
+    init(endpoint: URL?, clientSecret: String? = nil) {
         self.endpoint = endpoint
+        self.clientSecret = clientSecret
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 5
         cfg.urlCache = URLCache(memoryCapacity: 64 * 1024, diskCapacity: 0, directory: nil)
@@ -33,13 +66,25 @@ final class QuotaStore: ObservableObject {
     /// caller wins (the dashboard pull-to-refresh shouldn't queue behind
     /// a slow earlier request).
     func refresh() {
+        guard let endpoint else {
+            // Worker not yet deployed — silently no-op so the card can hide
+            // itself rather than surface a fake error.
+            self.lastError = nil
+            self.snapshot = nil
+            return
+        }
         fetchTask?.cancel()
         fetchTask = Task { [weak self] in
             guard let self else { return }
             self.isFetching = true
             defer { self.isFetching = false }
             do {
-                let (data, response) = try await self.session.data(from: self.endpoint)
+                var req = URLRequest(url: endpoint)
+                req.httpMethod = "GET"
+                if let secret = self.clientSecret {
+                    req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+                }
+                let (data, response) = try await self.session.data(for: req)
                 if Task.isCancelled { return }
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     throw NSError(

@@ -10,13 +10,14 @@ struct StatsSnapshot: Codable, Equatable {
     var connected: Bool
     var connectionStartedAt: Date?
 
-    /// Current throughput, bytes per second (instantaneous, from clash /traffic).
-    var uplinkBps: Int
-    var downlinkBps: Int
+    /// Current throughput, bytes per second (computed as differential of /connections totals).
+    var uplinkBps: Int64
+    var downlinkBps: Int64
 
     /// Cumulative session totals, bytes (from clash /connections uploadTotal/downloadTotal).
-    var totalUp: Int
-    var totalDown: Int
+    /// Int64 — these routinely exceed Int32 on a multi-GB session.
+    var totalUp: Int64
+    var totalDown: Int64
 
     var activeConnections: Int
     var proxyConnections: Int
@@ -28,10 +29,10 @@ struct StatsSnapshot: Codable, Equatable {
     init(timestamp: Date = Date(),
          connected: Bool = false,
          connectionStartedAt: Date? = nil,
-         uplinkBps: Int = 0,
-         downlinkBps: Int = 0,
-         totalUp: Int = 0,
-         totalDown: Int = 0,
+         uplinkBps: Int64 = 0,
+         downlinkBps: Int64 = 0,
+         totalUp: Int64 = 0,
+         totalDown: Int64 = 0,
          activeConnections: Int = 0,
          proxyConnections: Int = 0,
          directConnections: Int = 0,
