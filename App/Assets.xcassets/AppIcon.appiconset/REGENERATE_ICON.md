@@ -1,35 +1,45 @@
 # AppIcon.png
 
-This is a placeholder 1024x1024 icon (red `RF` on red background) generated
-on the cloud Mac during the first TestFlight upload (2026-05-09).
+## How the icon is currently produced
 
-The actual `AppIcon.png` binary is committed by the cloud Mac, not by the
-Windows working copy.
+`AppIcon.png` is generated programmatically by the Swift script
+`scripts/generate-app-icon.swift`, which runs on macOS. The script
+draws:
 
-To regenerate the placeholder on a Mac:
+- Full-bleed dark background (#0F0F12)
+- Subtle radial vignette for depth
+- Brand red circle inset by ~11% of the canvas
+- Specular highlight on the upper-left of the red circle
+- White SF Symbols `paperplane.fill` mark, slightly nudged below center
+
+This approximates the Default variant from the design spec the user
+provided on 2026-05-09. It is intentionally a programmatic placeholder,
+not a hand-designed icon.
+
+## How to regenerate
 
 ```sh
-cat > /tmp/makeicon.swift <<'EOF'
-import Cocoa
-let size = NSSize(width: 1024, height: 1024)
-let image = NSImage(size: size)
-image.lockFocus()
-NSColor(red: 0.83, green: 0.18, blue: 0.18, alpha: 1.0).setFill()
-NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
-let attrs: [NSAttributedString.Key: Any] = [
-  .font: NSFont.boldSystemFont(ofSize: 360),
-  .foregroundColor: NSColor.white
-]
-let str = NSAttributedString(string: "RF", attributes: attrs)
-let strSize = str.size()
-let pt = NSPoint(x: (size.width - strSize.width)/2, y: (size.height - strSize.height)/2)
-str.draw(at: pt)
-image.unlockFocus()
-let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
-let png = bitmap.representation(using: .png, properties: [:])!
-try png.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
-EOF
-swift /tmp/makeicon.swift App/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+cd <repo root>
+swift scripts/generate-app-icon.swift App/Assets.xcassets/AppIcon.appiconset/AppIcon.png
 ```
 
-Replace this placeholder with a real designed icon before App Store submission.
+The cloud Mac wrap-up script
+(`redfluent-vpn/scripts/cloud-mac-wrap-up.sh`) calls this automatically
+before each archive.
+
+## How to replace with a real designed icon
+
+When the actual designer-exported 1024x1024 PNG is ready:
+
+1. Save it as `AppIcon.png` in this same directory (overwrite the
+   generated one).
+2. Run `git update-index --skip-worktree` on this file so the
+   regeneration script does not stomp it on subsequent ships, OR
+   delete `scripts/generate-app-icon.swift` once a real icon is in
+   place.
+3. Re-archive and re-upload.
+
+## Design spec source
+
+See `Design/icon-spec.md` for the design intent (red circle with
+white paper plane on dark base, multiple variants, feature icon set).

@@ -109,10 +109,10 @@ struct MainDashboardView: View {
 
     private var orbIcon: String {
         switch tunnelManager.status {
-        case .connected:                       return "lock.shield.fill"
-        case .connecting, .disconnecting:      return "arrow.triangle.2.circlepath"
+        case .connected:                       return "checkmark.shield.fill"
+        case .connecting, .disconnecting:      return "paperplane.fill"
         case .failed:                          return "exclamationmark.triangle.fill"
-        case .disconnected:                    return "lock.shield"
+        case .disconnected:                    return "paperplane"
         }
     }
 
