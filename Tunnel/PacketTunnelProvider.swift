@@ -142,11 +142,20 @@ final class RedFluentPlatformInterface: NSObject, LibboxPlatformInterfaceProtoco
         settings.mtu = NSNumber(value: options.getMTU())
 
         // DNS
-        let dnsServer = try options.getDNSServerAddress()
-        let dns = NEDNSSettings(servers: [dnsServer.value])
-        dns.matchDomains = [""]
-        dns.matchDomainsNoSearch = false
-        settings.dnsSettings = dns
+        var dnsServers: [String] = []
+        if let dnsIter = try options.getDNSServerAddress() {
+            while dnsIter.hasNext() {
+                if let next = dnsIter.next() {
+                    dnsServers.append(next)
+                }
+            }
+        }
+        if !dnsServers.isEmpty {
+            let dns = NEDNSSettings(servers: dnsServers)
+            dns.matchDomains = [""]
+            dns.matchDomainsNoSearch = false
+            settings.dnsSettings = dns
+        }
 
         // IPv4
         var ipv4Addresses: [String] = []
@@ -305,6 +314,19 @@ final class RedFluentPlatformInterface: NSObject, LibboxPlatformInterfaceProtoco
 
     func underNetworkExtension() -> Bool { true }
     func includeAllNetworks() -> Bool { false }
+
+    // Newer libbox API additions — all safe defaults
+
+    func startNeighborMonitor(_ listener: LibboxNeighborUpdateListenerProtocol?) throws { }
+    func closeNeighborMonitor(_ listener: LibboxNeighborUpdateListenerProtocol?) throws { }
+
+    func localDNSTransport() -> LibboxLocalDNSTransportProtocol? { nil }
+
+    func systemCertificates() -> LibboxStringIteratorProtocol? { nil }
+
+    func registerMyInterface(_ name: String?) { }
+
+    func send(_ notification: LibboxNotification?) throws { }
 
     func clearDNSCache() {
         guard let provider, let settings = provider.networkSettings else { return }
