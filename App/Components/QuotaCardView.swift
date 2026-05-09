@@ -1,8 +1,7 @@
 import SwiftUI
 
 /// Monthly bandwidth quota card. Pulls its data from `QuotaStore` in
-/// the environment (which proxies the Cloudflare Worker in
-/// `workers/quota.js`). Shows a traffic-light progress bar, headline
+/// the environment. Shows a traffic-light progress bar, headline
 /// "used / total · N days left", and an outgoing/incoming split.
 struct QuotaCardView: View {
     @EnvironmentObject private var quotaStore: QuotaStore

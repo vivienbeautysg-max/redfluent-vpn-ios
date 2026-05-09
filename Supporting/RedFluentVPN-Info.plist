@@ -29,7 +29,7 @@
 	<key>QuotaClientSecret</key>
 	<string></string>
 	<key>QuotaEndpointURL</key>
-	<string>PLACEHOLDER</string>
+	<string>https://vpn-api.redfluent.com/quota</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Fetches the monthly bandwidth snapshot from the Cloudflare Worker
-/// (`workers/quota.js`) and caches the last successful response to the
+/// Fetches the monthly bandwidth snapshot from the backend quota endpoint
+/// and caches the last successful response to the
 /// shared App Group container so cold-start UIs can show stale data
 /// while a fresh fetch is in flight.
 @MainActor
@@ -19,7 +19,7 @@ final class QuotaStore: ObservableObject {
     private static let appGroupID = "group.com.redfluent.vpn"
     private static let cacheFileName = "quota.json"
 
-    /// True when a real Worker endpoint has been configured via
+    /// True when a real quota endpoint has been configured via
     /// `QuotaEndpointURL` in Info.plist. UI surfaces should hide the
     /// quota card entirely when this is false rather than render an
     /// error from the placeholder host.
