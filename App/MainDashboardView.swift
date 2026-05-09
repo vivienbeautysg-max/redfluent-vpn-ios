@@ -3,17 +3,23 @@ import SwiftUI
 struct MainDashboardView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var tunnelManager: TunnelManager
+    @EnvironmentObject private var statsStore: StatsStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showingDiagnostics = false
     @State private var showingSignOutConfirm = false
-    @State private var orbPulse = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: Theme.Spacing.lg) {
-                    statusOrb
+                    TrafficOrbRing(
+                        status: tunnelManager.status,
+                        snapshot: statsStore.snapshot,
+                        action: { await tunnelManager.toggle() }
+                    )
                     statusLabel
                     serverCard
+                    StatsCardView()
                     profileCard
                     Spacer(minLength: Theme.Spacing.xl)
                     privacyFootnote
@@ -54,6 +60,13 @@ struct MainDashboardView: View {
             .task {
                 await tunnelManager.loadStatus()
                 await appState.refresh()
+                statsStore.refresh()
+                await statsStore.ping()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                statsStore.refresh()
+                Task { await statsStore.ping() }
             }
         }
     }
@@ -65,64 +78,6 @@ struct MainDashboardView: View {
                 : [Theme.Color.brandPrimary.opacity(0.10), Color(.systemBackground)],
             startPoint: .top, endPoint: .bottom
         )
-    }
-
-    private var statusOrb: some View {
-        Button {
-            Task { await tunnelManager.toggle() }
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(orbGradient)
-                    .frame(width: 220, height: 220)
-                    .shadow(color: orbShadowColor, radius: 30, x: 0, y: 12)
-                if tunnelManager.status == .connecting || tunnelManager.status == .disconnecting {
-                    Circle()
-                        .stroke(Theme.Color.textOnBrand.opacity(0.35), lineWidth: 3)
-                        .frame(width: 240, height: 240)
-                        .scaleEffect(orbPulse ? 1.15 : 1.0)
-                        .opacity(orbPulse ? 0 : 1)
-                        .animation(.easeOut(duration: 1.2).repeatForever(autoreverses: false), value: orbPulse)
-                }
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 88, weight: .light))
-                    .foregroundStyle(Theme.Color.textOnBrand)
-                    .rotationEffect(.degrees(-30))
-                    .offset(x: -4, y: 2)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(tunnelManager.status.isConnected ? "Disconnect VPN" : "Connect VPN")
-        .disabled(tunnelManager.status == .connecting || tunnelManager.status == .disconnecting)
-        .padding(.top, Theme.Spacing.lg)
-        .scaleEffect(tunnelManager.status.isConnected ? 1.05 : 1.0)
-        .animation(.spring(duration: 0.6), value: tunnelManager.status)
-        .onAppear { orbPulse = true }
-    }
-
-    private var orbGradient: LinearGradient {
-        switch tunnelManager.status {
-        case .connected:
-            return LinearGradient(colors: [Theme.Color.success, Theme.Color.success.opacity(0.7)],
-                                  startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .connecting, .disconnecting:
-            return LinearGradient(colors: [Theme.Color.warning, Theme.Color.warning.opacity(0.7)],
-                                  startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .failed:
-            return LinearGradient(colors: [Theme.Color.danger, Theme.Color.danger.opacity(0.7)],
-                                  startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .disconnected:
-            return LinearGradient(colors: [Theme.Color.brandPrimary, Theme.Color.brandSecondary],
-                                  startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
-    }
-
-    private var orbShadowColor: Color {
-        switch tunnelManager.status {
-        case .connected: return Theme.Color.success.opacity(0.4)
-        case .failed:    return Theme.Color.danger.opacity(0.4)
-        default:         return Theme.Color.brandPrimary.opacity(0.4)
-        }
     }
 
     private var statusLabel: some View {
@@ -198,8 +153,8 @@ struct MainDashboardView: View {
 }
 
 #Preview {
-    let state = AppState()
-    return MainDashboardView()
-        .environmentObject(state)
+    MainDashboardView()
+        .environmentObject(AppState())
         .environmentObject(TunnelManager())
+        .environmentObject(StatsStore())
 }

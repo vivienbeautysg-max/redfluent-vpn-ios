@@ -3,7 +3,14 @@ import SwiftUI
 struct DiagnosticsView: View {
     @EnvironmentObject private var tunnelManager: TunnelManager
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var statsStore: StatsStore
     @Environment(\.dismiss) private var dismiss
+
+    private static let tsFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
 
     var body: some View {
         NavigationStack {
@@ -30,6 +37,32 @@ struct DiagnosticsView: View {
                     LabeledContent("Public ID", value: DeviceIdentity.publicId)
                         .font(Theme.Font.monoBody)
                     LabeledContent("App",       value: DeviceIdentity.appVersion)
+                }
+
+                Section("Live Stats") {
+                    if let snap = statsStore.snapshot {
+                        LabeledContent("Timestamp",
+                                       value: Self.tsFormatter.string(from: snap.timestamp))
+                            .font(Theme.Font.monoBody)
+                        LabeledContent("Active conns", value: "\(snap.activeConnections)")
+                        LabeledContent("Proxy:Direct",
+                                       value: "\(snap.proxyConnections):\(snap.directConnections)")
+                        LabeledContent("Total ↑", value: "\(snap.totalUp) B")
+                        LabeledContent("Total ↓", value: "\(snap.totalDown) B")
+                        LabeledContent("Tunnel ping",
+                                       value: snap.pingMs.map { "\($0) ms" } ?? "—")
+                    } else {
+                        Text("No snapshot yet")
+                            .font(Theme.Font.body)
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                    LabeledContent("Light ping",
+                                   value: statsStore.lastPingMs.map { "\($0) ms" } ?? "—")
+                    if let err = statsStore.lastRefreshError {
+                        LabeledContent("Refresh error", value: err)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.danger)
+                    }
                 }
 
                 Section("Last error") {
@@ -72,4 +105,5 @@ struct DiagnosticsView: View {
     DiagnosticsView()
         .environmentObject(TunnelManager())
         .environmentObject(AppState())
+        .environmentObject(StatsStore())
 }

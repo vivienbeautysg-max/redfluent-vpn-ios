@@ -13,7 +13,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     var commandServer: LibboxCommandServer?
     private lazy var platformInterface = RedFluentPlatformInterface(provider: self)
     var networkSettings: NEPacketTunnelNetworkSettings?
+    private var statsPoller: ClashStatsPoller?
     #endif
+
+    // Clash API endpoint injected into the sing-box config at boot.
+    private static let clashAPIController = "127.0.0.1:9090"
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called")
@@ -28,6 +32,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("stopTunnel reason=\(reason.rawValue)")
         #if HAS_LIBBOX
+        statsPoller?.stop()
+        statsPoller = nil
         try? commandServer?.close()
         commandServer = nil
         #endif
@@ -97,16 +103,64 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let overrideOptions = LibboxOverrideOptions()
         try server.startOrReloadService(configContent, options: overrideOptions)
         logger.info("sing-box service started")
+
+        // 6. Write an immediate "connected" snapshot so the UI reflects state
+        //    without waiting for the first poll tick (~2s later).
+        let bootSnap = StatsSnapshot(
+            timestamp: Date(),
+            connected: true,
+            connectionStartedAt: Date()
+        )
+        SharedContainer.writeStats(bootSnap)
+
+        // 7. Kick off the clash API poller asynchronously so we never block
+        //    extension startup. Defensive: if the API isn't yet listening,
+        //    the poller silently retries each tick.
+        let poller = ClashStatsPoller()
+        statsPoller = poller
+        Task.detached(priority: .utility) {
+            poller.start()
+        }
     }
 
     private func loadConfig() throws -> String {
-        if let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let json = String(data: data, encoding: .utf8) {
-            return json
+        guard let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else {
+            throw NSError(domain: "rfv.tunnel", code: 200,
+                          userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
         }
-        throw NSError(domain: "rfv.tunnel", code: 200,
-                      userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
+        return try injectClashAPI(into: data)
+    }
+
+    /// Parse the bundled config JSON, ensure `experimental.clash_api` exists
+    /// with our external_controller address, and re-serialise. Idempotent —
+    /// if the config already has a clash_api block, we leave it alone except
+    /// to guarantee the controller address matches what the poller expects.
+    private func injectClashAPI(into data: Data) throws -> String {
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "rfv.tunnel", code: 201,
+                          userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json: root is not an object"])
+        }
+
+        var experimental = (root["experimental"] as? [String: Any]) ?? [:]
+        var clashAPI = (experimental["clash_api"] as? [String: Any]) ?? [:]
+
+        if clashAPI["external_controller"] == nil {
+            clashAPI["external_controller"] = Self.clashAPIController
+        }
+        if clashAPI["store_selected"] == nil {
+            clashAPI["store_selected"] = false
+        }
+
+        experimental["clash_api"] = clashAPI
+        root["experimental"] = experimental
+
+        let mutated = try JSONSerialization.data(withJSONObject: root, options: [])
+        guard let json = String(data: mutated, encoding: .utf8) else {
+            throw NSError(domain: "rfv.tunnel", code: 202,
+                          userInfo: [NSLocalizedDescriptionKey: "could not stringify mutated config"])
+        }
+        return json
     }
     #endif
 }
