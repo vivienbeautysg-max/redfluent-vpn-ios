@@ -143,12 +143,9 @@ final class RedFluentPlatformInterface: NSObject, LibboxPlatformInterfaceProtoco
 
         // DNS
         var dnsServers: [String] = []
-        if let dnsIter = try options.getDNSServerAddress() {
-            while dnsIter.hasNext() {
-                if let next = dnsIter.next() {
-                    dnsServers.append(next)
-                }
-            }
+        let dnsIter = try options.getDNSServerAddress()
+        while dnsIter.hasNext() {
+            dnsServers.append(dnsIter.next())
         }
         if !dnsServers.isEmpty {
             let dns = NEDNSSettings(servers: dnsServers)
