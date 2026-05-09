@@ -41,7 +41,7 @@ final class StatsStore: ObservableObject {
     /// save battery. Reads only from the local App Group file (no network).
     private var autoRefreshTask: Task<Void, Never>?
 
-    func startAutoRefresh(intervalSeconds: Double = 2.0) {
+    func startAutoRefresh(intervalSeconds: Double = 1.0) {
         stopAutoRefresh()
         autoRefreshTask = Task { [weak self] in
             while !Task.isCancelled {

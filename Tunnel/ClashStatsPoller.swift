@@ -40,7 +40,7 @@ actor ClashStatsPoller {
 
     init(host: String = "127.0.0.1",
          port: Int = 9090,
-         interval: TimeInterval = 2.0) {
+         interval: TimeInterval = 1.0) {
         self.host = host
         self.port = port
         self.interval = interval
