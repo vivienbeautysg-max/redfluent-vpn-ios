@@ -65,12 +65,20 @@ struct MainDashboardView: View {
                 statsStore.refresh()
                 await statsStore.ping()
                 quotaStore.refresh()
+                statsStore.startAutoRefresh()
+            }
+            .onDisappear {
+                statsStore.stopAutoRefresh()
             }
             .onChange(of: scenePhase) { _, phase in
-                guard phase == .active else { return }
-                statsStore.refresh()
-                Task { await statsStore.ping() }
-                quotaStore.refresh()
+                if phase == .active {
+                    statsStore.refresh()
+                    Task { await statsStore.ping() }
+                    quotaStore.refresh()
+                    statsStore.startAutoRefresh()
+                } else {
+                    statsStore.stopAutoRefresh()
+                }
             }
         }
     }

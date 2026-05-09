@@ -36,6 +36,26 @@ final class StatsStore: ObservableObject {
     /// late-completing failure can no longer overwrite an earlier success.
     private var pingTask: Task<Void, Never>?
 
+    /// Periodic refresh task — when running, polls stats.json every 2s while
+    /// the dashboard is on screen. Stopped on background / view disappear to
+    /// save battery. Reads only from the local App Group file (no network).
+    private var autoRefreshTask: Task<Void, Never>?
+
+    func startAutoRefresh(intervalSeconds: Double = 2.0) {
+        stopAutoRefresh()
+        autoRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refresh()
+                try? await Task.sleep(nanoseconds: UInt64(intervalSeconds * 1_000_000_000))
+            }
+        }
+    }
+
+    func stopAutoRefresh() {
+        autoRefreshTask?.cancel()
+        autoRefreshTask = nil
+    }
+
     private var statsFileURL: URL? {
         FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID)?
