@@ -4,6 +4,7 @@ struct MainDashboardView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var tunnelManager: TunnelManager
     @EnvironmentObject private var statsStore: StatsStore
+    @EnvironmentObject private var quotaStore: QuotaStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingDiagnostics = false
     @State private var showingSignOutConfirm = false
@@ -20,6 +21,7 @@ struct MainDashboardView: View {
                     statusLabel
                     serverCard
                     StatsCardView()
+                    QuotaCardView()
                     profileCard
                     Spacer(minLength: Theme.Spacing.xl)
                     privacyFootnote
@@ -62,11 +64,13 @@ struct MainDashboardView: View {
                 await appState.refresh()
                 statsStore.refresh()
                 await statsStore.ping()
+                quotaStore.refresh()
             }
             .onChange(of: scenePhase) { _, phase in
                 guard phase == .active else { return }
                 statsStore.refresh()
                 Task { await statsStore.ping() }
+                quotaStore.refresh()
             }
         }
     }
@@ -157,4 +161,5 @@ struct MainDashboardView: View {
         .environmentObject(AppState())
         .environmentObject(TunnelManager())
         .environmentObject(StatsStore())
+        .environmentObject(QuotaStore())
 }
