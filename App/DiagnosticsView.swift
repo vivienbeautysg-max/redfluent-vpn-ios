@@ -2,44 +2,74 @@ import SwiftUI
 
 struct DiagnosticsView: View {
     @EnvironmentObject private var tunnelManager: TunnelManager
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        List {
-            Section("Status") {
-                LabeledContent("Tunnel", value: tunnelManager.status.displayName)
-                LabeledContent("Server", value: "Tokyo")
-                LabeledContent("Mode", value: "Secure Tunnel")
-                LabeledContent("Config", value: "review-safe-profile-v1")
-            }
+        NavigationStack {
+            List {
+                Section("Tunnel") {
+                    LabeledContent("Status", value: tunnelManager.status.displayName)
+                    LabeledContent("Server", value: appState.currentProfile?.serverRegion ?? "—")
+                    LabeledContent("Mode",   value: "Secure Tunnel")
+                }
 
-            Section("Last Error") {
-                Text(tunnelManager.lastError ?? "No recent error")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+                if let profile = appState.currentProfile {
+                    Section("Activation") {
+                        LabeledContent("Owner",   value: profile.ownerLabel)
+                        LabeledContent("Profile", value: profile.profileId)
+                            .font(Theme.Font.monoBody)
+                        LabeledContent("Config",  value: profile.configVersion)
+                        if let exp = profile.expiresAt {
+                            LabeledContent("Expires", value: exp)
+                        }
+                    }
+                }
 
-            Section {
-                ShareLink("Copy diagnostics", item: diagnosticsText)
+                Section("Device") {
+                    LabeledContent("Public ID", value: DeviceIdentity.publicId)
+                        .font(Theme.Font.monoBody)
+                    LabeledContent("App",       value: DeviceIdentity.appVersion)
+                }
+
+                Section("Last error") {
+                    Text(tunnelManager.lastError ?? appState.lastActivationError ?? "No recent error")
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                }
+
+                Section {
+                    ShareLink("Copy diagnostics", item: diagnosticsText)
+                }
+            }
+            .navigationTitle("Diagnostics")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
-        .navigationTitle("Diagnostics")
     }
 
     private var diagnosticsText: String {
-        """
+        let profile = appState.currentProfile
+        return """
         RedFluent VPN diagnostics
-        Status: \(tunnelManager.status.displayName)
-        Server: Tokyo
-        Mode: Secure Tunnel
-        Config: review-safe-profile-v1
-        Last error: \(tunnelManager.lastError ?? "none")
+        Status:    \(tunnelManager.status.displayName)
+        Server:    \(profile?.serverRegion ?? "—")
+        Mode:      Secure Tunnel
+        Owner:     \(profile?.ownerLabel ?? "—")
+        Profile:   \(profile?.profileId ?? "—")
+        Config:    \(profile?.configVersion ?? "—")
+        Device:    \(DeviceIdentity.publicId)
+        App:       \(DeviceIdentity.appVersion)
+        Last err:  \(tunnelManager.lastError ?? appState.lastActivationError ?? "none")
         """
     }
 }
 
 #Preview {
-    NavigationStack {
-        DiagnosticsView()
-            .environmentObject(TunnelManager())
-    }
+    DiagnosticsView()
+        .environmentObject(TunnelManager())
+        .environmentObject(AppState())
 }
