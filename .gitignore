@@ -4,3 +4,10 @@ DerivedData/
 *.xcuserdata/
 *.xcuserstate
 RedFluentVPN.xcodeproj/
+
+# Libbox.xcframework is built per-machine via gomobile; don't commit (104MB+)
+Frameworks/
+
+# Bundled VPN config contains production VLESS+Reality credentials; never commit
+Tunnel/Resources/*.json
+Tunnel/Resources/*.plist
