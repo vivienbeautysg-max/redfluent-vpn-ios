@@ -36,7 +36,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.redfluent.vpn.tunnel
         INFOPLIST_FILE: Supporting/RedFluentVPNTunnel-Info.plist
         CODE_SIGN_ENTITLEMENTS: Entitlements/RedFluentVPNTunnel.entitlements
-        APPLICATION_EXTENSION_API_ONLY: NO
+        APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
         PRODUCT_NAME: RedFluentVPNTunnel
         CODE_SIGN_IDENTITY: "Apple Distribution"
@@ -44,7 +44,7 @@ targets:
         OTHER_SWIFT_FLAGS: "-DHAS_LIBBOX"
         FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/Frameworks"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-        OTHER_LDFLAGS: "-framework UIKit -framework CoreTelephony -framework SystemConfiguration"
+        OTHER_LDFLAGS: "-framework SystemConfiguration -framework CoreTelephony"
     dependencies:
       - framework: Frameworks/Libbox.xcframework
         embed: true
