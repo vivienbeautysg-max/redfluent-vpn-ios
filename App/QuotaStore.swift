@@ -31,9 +31,19 @@ final class QuotaStore: ObservableObject {
     /// nil and `refresh()` becomes a no-op.
     init() {
         let infoEndpoint = Bundle.main.object(forInfoDictionaryKey: "QuotaEndpointURL") as? String
-        if let raw = infoEndpoint, !raw.isEmpty, raw != "PLACEHOLDER",
-           let url = URL(string: raw) {
-            self.endpoint = url
+        if let raw = infoEndpoint {
+            // Trim + uppercase-compare so misformatted plist values (extra
+            // whitespace, "placeholder", "Placeholder", etc.) fail closed
+            // — i.e. the card hides — rather than attempting a URL fetch
+            // against a bad host.
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty,
+               trimmed.uppercased() != "PLACEHOLDER",
+               let url = URL(string: trimmed) {
+                self.endpoint = url
+            } else {
+                self.endpoint = nil
+            }
         } else {
             self.endpoint = nil
         }

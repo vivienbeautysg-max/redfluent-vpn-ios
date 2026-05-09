@@ -132,10 +132,16 @@ actor ClashStatsPoller {
             }
         } else if let bootedAt = connectionStartedAt {
             let sessionElapsed = now.timeIntervalSince(bootedAt)
-            if sessionElapsed > 0 {
+            // Require at least 1s of session before falling back to the
+            // session average. With sub-second elapsed, even a tiny totals
+            // value (a few KB of handshake traffic) divides into a fake
+            // multi-MB/s reading. The next tick (~2s later) will compute a
+            // proper differential anyway.
+            if sessionElapsed >= 1.0 {
                 uplinkBps = max(0, Int64(Double(totalUp) / sessionElapsed))
                 downlinkBps = max(0, Int64(Double(totalDown) / sessionElapsed))
             }
+            // Otherwise leave at 0; differential will kick in on tick 2.
         }
         previousTotalUp = totalUp
         previousTotalDown = totalDown

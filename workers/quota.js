@@ -33,6 +33,20 @@ function corsHeaders(env) {
   };
 }
 
+// Constant-time string compare to deny a timing oracle on the bearer
+// token. JS's `===` short-circuits at the first byte difference; an
+// attacker with a low-jitter network path could (in principle) recover
+// the secret one byte at a time. safeEq always walks the full string.
+function safeEq(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length !== b.length) return false;
+  let r = 0;
+  for (let i = 0; i < a.length; i++) {
+    r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return r === 0;
+}
+
 function isAuthorized(request, env) {
   // If CLIENT_SECRET is unset we allow unauthenticated requests for
   // backward compat with already-deployed workers. Setting it locks the
@@ -41,7 +55,7 @@ function isAuthorized(request, env) {
   const expected = env && env.CLIENT_SECRET;
   if (!expected) return true;
   const header = request.headers.get("Authorization") || "";
-  return header === `Bearer ${expected}`;
+  return safeEq(header, `Bearer ${expected}`);
 }
 
 export default {
