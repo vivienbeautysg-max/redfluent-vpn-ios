@@ -27,10 +27,12 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-      - Tunnel
+      - path: Tunnel
+        excludes:
+          - Resources
       - path: Tunnel/Resources
         optional: true
-        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.redfluent.vpn.tunnel
