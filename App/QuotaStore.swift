@@ -89,13 +89,19 @@ final class QuotaStore: ObservableObject {
             self.isFetching = true
             defer { self.isFetching = false }
             do {
-                var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
-                components?.queryItems = (components?.queryItems ?? []) + [
-                    URLQueryItem(name: "fresh", value: "1")
-                ]
-                var req = URLRequest(url: components?.url ?? endpoint)
+                let requestURL: URL
+                if var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) {
+                    var queryItems = components.queryItems ?? []
+                    queryItems.append(URLQueryItem(name: "fresh", value: "1"))
+                    components.queryItems = queryItems
+                    requestURL = components.url ?? endpoint
+                } else {
+                    requestURL = endpoint
+                }
+
+                var req = URLRequest(url: requestURL)
                 req.httpMethod = "GET"
-                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                req.cachePolicy = .reloadIgnoringLocalCacheData
                 req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
                 if let secret = self.clientSecret {
                     req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
