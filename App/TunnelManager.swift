@@ -73,21 +73,20 @@ final class TunnelManager: ObservableObject {
 
     private func loadOrCreateManager() async throws -> NETunnelProviderManager {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        if let existing = managers.first {
-            return existing
-        }
+        let manager = managers.first ?? NETunnelProviderManager()
 
-        let manager = NETunnelProviderManager()
-        let protocolConfiguration = NETunnelProviderProtocol()
-        protocolConfiguration.providerBundleIdentifier = providerBundleIdentifier
-        protocolConfiguration.serverAddress = "RedFluent Tokyo"
-        protocolConfiguration.providerConfiguration = [
+        let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = providerBundleIdentifier
+        proto.serverAddress = "RedFluent Tokyo"
+        proto.providerConfiguration = [
             "configProfile": "review-safe-profile-v1"
         ]
+        proto.disconnectOnSleep = false
 
         manager.localizedDescription = tunnelDescription
-        manager.protocolConfiguration = protocolConfiguration
+        manager.protocolConfiguration = proto
         manager.isEnabled = true
+        manager.isOnDemandEnabled = false
 
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()

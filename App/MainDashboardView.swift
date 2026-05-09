@@ -5,6 +5,7 @@ struct MainDashboardView: View {
     @EnvironmentObject private var tunnelManager: TunnelManager
     @State private var showingDiagnostics = false
     @State private var showingSignOutConfirm = false
+    @State private var orbPulse = false
 
     var body: some View {
         NavigationStack {
@@ -12,7 +13,6 @@ struct MainDashboardView: View {
                 VStack(spacing: Theme.Spacing.lg) {
                     statusOrb
                     statusLabel
-                    connectButton
                     serverCard
                     profileCard
                     Spacer(minLength: Theme.Spacing.xl)
@@ -68,18 +68,36 @@ struct MainDashboardView: View {
     }
 
     private var statusOrb: some View {
-        ZStack {
-            Circle()
-                .fill(orbGradient)
-                .frame(width: 200, height: 200)
-                .shadow(color: orbShadowColor, radius: 30, x: 0, y: 12)
-            Image(systemName: orbIcon)
-                .font(.system(size: 80, weight: .light))
-                .foregroundStyle(Theme.Color.textOnBrand)
+        Button {
+            Task { await tunnelManager.toggle() }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(orbGradient)
+                    .frame(width: 220, height: 220)
+                    .shadow(color: orbShadowColor, radius: 30, x: 0, y: 12)
+                if tunnelManager.status == .connecting || tunnelManager.status == .disconnecting {
+                    Circle()
+                        .stroke(Theme.Color.textOnBrand.opacity(0.35), lineWidth: 3)
+                        .frame(width: 240, height: 240)
+                        .scaleEffect(orbPulse ? 1.15 : 1.0)
+                        .opacity(orbPulse ? 0 : 1)
+                        .animation(.easeOut(duration: 1.2).repeatForever(autoreverses: false), value: orbPulse)
+                }
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 88, weight: .light))
+                    .foregroundStyle(Theme.Color.textOnBrand)
+                    .rotationEffect(.degrees(-30))
+                    .offset(x: -4, y: 2)
+            }
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(tunnelManager.status.isConnected ? "Disconnect VPN" : "Connect VPN")
+        .disabled(tunnelManager.status == .connecting || tunnelManager.status == .disconnecting)
         .padding(.top, Theme.Spacing.lg)
         .scaleEffect(tunnelManager.status.isConnected ? 1.05 : 1.0)
         .animation(.spring(duration: 0.6), value: tunnelManager.status)
+        .onAppear { orbPulse = true }
     }
 
     private var orbGradient: LinearGradient {
@@ -107,15 +125,6 @@ struct MainDashboardView: View {
         }
     }
 
-    private var orbIcon: String {
-        switch tunnelManager.status {
-        case .connected:                       return "checkmark.shield.fill"
-        case .connecting, .disconnecting:      return "paperplane.fill"
-        case .failed:                          return "exclamationmark.triangle.fill"
-        case .disconnected:                    return "paperplane"
-        }
-    }
-
     private var statusLabel: some View {
         VStack(spacing: Theme.Spacing.xs) {
             Text(tunnelManager.status.displayName)
@@ -126,23 +135,6 @@ struct MainDashboardView: View {
                 .foregroundStyle(Theme.Color.textSecondary)
                 .multilineTextAlignment(.center)
         }
-    }
-
-    private var connectButton: some View {
-        Button {
-            Task { await tunnelManager.toggle() }
-        } label: {
-            Text(tunnelManager.status.isConnected ? "Disconnect" : "Connect")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, Theme.Spacing.md)
-                .background(tunnelManager.status.isConnected
-                            ? Theme.Color.danger
-                            : Theme.Color.brandPrimary)
-                .foregroundStyle(Theme.Color.textOnBrand)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
-        }
-        .disabled(tunnelManager.status == .connecting || tunnelManager.status == .disconnecting)
     }
 
     private var serverCard: some View {
