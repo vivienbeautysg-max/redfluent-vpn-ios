@@ -1,0 +1,14 @@
+{
+  "profile": "review-safe-profile-v1",
+  "server": {
+    "name": "Tokyo",
+    "publicExitIp": "45.32.31.229"
+  },
+  "urls": {
+    "marketing": "https://www.redfluent.com/vpn",
+    "privacy": "https://www.redfluent.com/privacy",
+    "terms": "https://www.redfluent.com/terms",
+    "support": "https://www.redfluent.com/support"
+  },
+  "notes": "Example only. Do not store production tunnel secrets in this file."
+}
