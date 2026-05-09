@@ -23,6 +23,19 @@ final class StatsStore: ObservableObject {
         return d
     }()
 
+    /// Reused URLSession for ping(). Per Apple's URLSession docs, sessions
+    /// should be retained across requests; constructing one per call leaks
+    /// configuration objects and prevents connection reuse.
+    private let pingSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 3
+        return URLSession(configuration: cfg)
+    }()
+
+    /// Tracks the in-flight ping so rapid scenePhase changes don't race; a
+    /// late-completing failure can no longer overwrite an earlier success.
+    private var pingTask: Task<Void, Never>?
+
     private var statsFileURL: URL? {
         FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID)?
@@ -57,21 +70,30 @@ final class StatsStore: ObservableObject {
 
     /// Lightweight HTTP HEAD-equivalent against the public health endpoint.
     /// Stores the round-trip in `lastPingMs`; sets nil on failure/timeout.
+    /// Cancels any prior in-flight ping to dedup overlapping scenePhase calls.
     func ping() async {
-        var request = URLRequest(url: Self.pingURL, timeoutInterval: 3)
-        request.httpMethod = "GET"
-        let session = URLSession(configuration: .ephemeral)
-        let started = Date()
-        do {
-            let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else {
-                lastPingMs = nil
-                return
+        pingTask?.cancel()
+        let session = pingSession
+        let url = Self.pingURL
+        let task = Task { [weak self] in
+            var request = URLRequest(url: url, timeoutInterval: 3)
+            request.httpMethod = "GET"
+            let started = Date()
+            let result: Int?
+            do {
+                let (_, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
+                    result = Int(Date().timeIntervalSince(started) * 1000)
+                } else {
+                    result = nil
+                }
+            } catch {
+                result = nil
             }
-            let ms = Int(Date().timeIntervalSince(started) * 1000)
-            lastPingMs = ms
-        } catch {
-            lastPingMs = nil
+            if Task.isCancelled { return }
+            await MainActor.run { self?.lastPingMs = result }
         }
+        pingTask = task
+        await task.value
     }
 }

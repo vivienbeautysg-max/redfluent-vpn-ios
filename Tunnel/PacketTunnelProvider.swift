@@ -19,6 +19,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // Clash API endpoint injected into the sing-box config at boot.
     private static let clashAPIController = "127.0.0.1:9090"
 
+    #if HAS_LIBBOX
+    // Per-process random secret for the loopback clash API. Defense-in-depth:
+    // even though the API only binds to 127.0.0.1, we still require a Bearer
+    // token so any other process on the device cannot poll our stats.
+    private let clashSecret = UUID().uuidString
+    #endif
+
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called")
 
@@ -32,7 +39,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("stopTunnel reason=\(reason.rawValue)")
         #if HAS_LIBBOX
-        statsPoller?.stop()
+        if let poller = statsPoller {
+            await poller.stop()
+        }
         statsPoller = nil
         try? commandServer?.close()
         commandServer = nil
@@ -106,20 +115,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // 6. Write an immediate "connected" snapshot so the UI reflects state
         //    without waiting for the first poll tick (~2s later).
+        let bootedAt = Date()
         let bootSnap = StatsSnapshot(
-            timestamp: Date(),
+            timestamp: bootedAt,
             connected: true,
-            connectionStartedAt: Date()
+            connectionStartedAt: bootedAt
         )
         SharedContainer.writeStats(bootSnap)
 
-        // 7. Kick off the clash API poller asynchronously so we never block
-        //    extension startup. Defensive: if the API isn't yet listening,
-        //    the poller silently retries each tick.
+        // 7. Kick off the clash API poller. The actor serializes start/stop
+        //    against any in-flight tick. Pass the boot timestamp so the
+        //    duration timer never resets backwards on the first tick.
         let poller = ClashStatsPoller()
         statsPoller = poller
-        Task.detached(priority: .utility) {
-            poller.start()
+        let secret = clashSecret
+        Task {
+            await poller.start(bootedAt: bootedAt, secret: secret)
         }
     }
 
@@ -133,9 +144,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Parse the bundled config JSON, ensure `experimental.clash_api` exists
-    /// with our external_controller address, and re-serialise. Idempotent —
-    /// if the config already has a clash_api block, we leave it alone except
-    /// to guarantee the controller address matches what the poller expects.
+    /// with our external_controller address, and re-serialise.
+    ///
+    /// We always force the controller to match the poller; bundled configs
+    /// cannot override this (otherwise a stale port in the bundled JSON
+    /// would silently break stats polling). Idempotency is preserved —
+    /// re-setting the same value is a no-op.
     private func injectClashAPI(into data: Data) throws -> String {
         guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NSError(domain: "rfv.tunnel", code: 201,
@@ -145,9 +159,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         var experimental = (root["experimental"] as? [String: Any]) ?? [:]
         var clashAPI = (experimental["clash_api"] as? [String: Any]) ?? [:]
 
-        if clashAPI["external_controller"] == nil {
-            clashAPI["external_controller"] = Self.clashAPIController
-        }
+        // Unconditional overwrite — the poller is hardcoded to talk to this
+        // address; any mismatch in the bundled config would silently break it.
+        clashAPI["external_controller"] = Self.clashAPIController
+        // Defense-in-depth: require a Bearer secret on the loopback API.
+        clashAPI["secret"] = self.clashSecret
         if clashAPI["store_selected"] == nil {
             clashAPI["store_selected"] = false
         }

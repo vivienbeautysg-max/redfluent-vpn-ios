@@ -126,15 +126,23 @@ struct StatsCardView: View {
                     angularInset: 1.5
                 )
                 .foregroundStyle(slice.color)
-                .annotation(position: .overlay) {
-                    if slice.count > 0 {
-                        Text(slice.kind)
-                            .font(Theme.Font.micro)
-                            .foregroundStyle(Theme.Color.textOnBrand)
+            }
+            .frame(height: 120)
+            // Legend rendered outside the slices so we never rely on
+            // text-on-fill contrast (slice colors don't meet WCAG against
+            // textOnBrand white).
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                ForEach(data) { slice in
+                    HStack(spacing: Theme.Spacing.xs) {
+                        Circle()
+                            .fill(slice.color)
+                            .frame(width: 8, height: 8)
+                        Text("\(slice.kind): \(slice.count) conns")
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.textPrimary)
                     }
                 }
             }
-            .frame(height: 120)
         }
     }
 

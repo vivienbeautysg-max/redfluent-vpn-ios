@@ -5,9 +5,10 @@ import os.log
 /// at 127.0.0.1:9090) every ~2 seconds and writes a `StatsSnapshot` into the
 /// shared App Group container.
 ///
-/// Intentionally framework-clean (no Libbox dependency) so it can be unit-
-/// tested or reused in other targets.
-final class ClashStatsPoller {
+/// Implemented as a Swift `actor` so all property access is serialized — no
+/// data races between the start/stop callers (provider main actor) and the
+/// detached polling task.
+actor ClashStatsPoller {
 
     // MARK: Configuration
 
@@ -21,6 +22,17 @@ final class ClashStatsPoller {
 
     private var task: Task<Void, Never>?
     private var connectionStartedAt: Date?
+    private var secret: String?
+
+    // Differential bookkeeping for /traffic substitute.
+    // sing-box's /traffic is a streaming chunked endpoint that
+    // `URLSession.data(for:)` cannot consume — it would block until the
+    // server closes the connection (never), causing perpetual 1s timeouts.
+    // We instead derive instantaneous Bps from successive /connections
+    // uploadTotal / downloadTotal samples.
+    private var previousTotalUp: Int?
+    private var previousTotalDown: Int?
+    private var previousTickAt: Date?
 
     // MARK: Init
 
@@ -42,8 +54,13 @@ final class ClashStatsPoller {
 
     // MARK: Lifecycle
 
-    func start() {
+    /// Begin polling. `bootedAt` is the timestamp the provider considers the
+    /// connection to have started — passed in so the duration timer never
+    /// jumps backwards on the first tick.
+    func start(bootedAt: Date, secret: String?) {
         guard task == nil else { return }
+        self.connectionStartedAt = bootedAt
+        self.secret = secret
         logger.info("ClashStatsPoller starting (every \(self.interval, privacy: .public)s)")
 
         let intervalNs = UInt64(interval * 1_000_000_000)
@@ -55,10 +72,13 @@ final class ClashStatsPoller {
         }
     }
 
-    func stop() {
+    func stop() async {
         logger.info("ClashStatsPoller stopping")
         task?.cancel()
+        let pending = task
         task = nil
+        // Await clean shutdown so any in-flight tick observes cancellation.
+        await pending?.value
 
         // Write a final "disconnected" snapshot so the UI can react promptly.
         let snap = StatsSnapshot(
@@ -69,30 +89,46 @@ final class ClashStatsPoller {
         )
         SharedContainer.writeStats(snap)
         connectionStartedAt = nil
+        previousTotalUp = nil
+        previousTotalDown = nil
+        previousTickAt = nil
     }
 
     // MARK: Polling
 
     private func tick() async {
-        // Fetch traffic + connections concurrently. Either may fail (e.g. clash
-        // API isn't up yet); we degrade gracefully.
-        async let trafficResult: TrafficPayload? = fetch(path: "/traffic")
-        async let connectionsResult: ConnectionsPayload? = fetch(path: "/connections")
+        // Only /connections — /traffic is a chunked streaming endpoint
+        // incompatible with URLSession.data(for:).
+        let connections: ConnectionsPayload? = await fetch(path: "/connections")
 
-        let traffic = await trafficResult
-        let connections = await connectionsResult
+        // If the API didn't respond, the daemon is probably not ready yet —
+        // silently skip this tick.
+        guard let connections else { return }
 
-        // If neither responded, the API is probably not ready yet — silently
-        // skip this tick (no crash, no log spam).
-        guard traffic != nil || connections != nil else { return }
+        let now = Date()
+        let totalUp = connections.uploadTotal ?? 0
+        let totalDown = connections.downloadTotal ?? 0
 
-        if connectionStartedAt == nil {
-            connectionStartedAt = Date()
+        // Compute instantaneous Bps from the difference between this and the
+        // previous sample. First tick has no baseline → 0.
+        var uplinkBps = 0
+        var downlinkBps = 0
+        if let prevUp = previousTotalUp,
+           let prevDown = previousTotalDown,
+           let prevAt = previousTickAt {
+            let elapsed = now.timeIntervalSince(prevAt)
+            if elapsed > 0 {
+                uplinkBps = max(0, Int(Double(totalUp - prevUp) / elapsed))
+                downlinkBps = max(0, Int(Double(totalDown - prevDown) / elapsed))
+            }
         }
+        previousTotalUp = totalUp
+        previousTotalDown = totalDown
+        previousTickAt = now
 
         var proxy = 0
         var direct = 0
-        if let conns = connections?.connections {
+        if let conns = connections.connections {
             for c in conns {
                 let chains = c.chains ?? []
                 let lower = chains.map { $0.lowercased() }
@@ -107,14 +143,14 @@ final class ClashStatsPoller {
         }
 
         let snap = StatsSnapshot(
-            timestamp: Date(),
+            timestamp: now,
             connected: true,
             connectionStartedAt: connectionStartedAt,
-            uplinkBps: traffic?.up ?? 0,
-            downlinkBps: traffic?.down ?? 0,
-            totalUp: connections?.uploadTotal ?? 0,
-            totalDown: connections?.downloadTotal ?? 0,
-            activeConnections: connections?.connections?.count ?? 0,
+            uplinkBps: uplinkBps,
+            downlinkBps: downlinkBps,
+            totalUp: totalUp,
+            totalDown: totalDown,
+            activeConnections: connections.connections?.count ?? 0,
             proxyConnections: proxy,
             directConnections: direct,
             pingMs: nil // populated by future latency probe
@@ -129,6 +165,9 @@ final class ClashStatsPoller {
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let secret, !secret.isEmpty {
+            req.addValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+        }
 
         do {
             let (data, response) = try await session.data(for: req)
@@ -147,11 +186,6 @@ final class ClashStatsPoller {
     //
     // We intentionally model only the fields we need and mark everything
     // optional so a schema drift in upstream sing-box doesn't crash the poller.
-
-    private struct TrafficPayload: Decodable {
-        let up: Int?
-        let down: Int?
-    }
 
     private struct ConnectionsPayload: Decodable {
         let connections: [ConnectionEntry]?
