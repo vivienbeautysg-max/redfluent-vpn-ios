@@ -40,7 +40,7 @@ actor APIClient {
     private let decoder: JSONDecoder
 
     private var baseURL: URL {
-        URL(string: ProcessInfo.processInfo.environment["RFV_API_BASE"] ?? "https://api.redfluent.com/vpn")!
+        URL(string: ProcessInfo.processInfo.environment["RFV_API_BASE"] ?? "https://vpn-api.redfluent.com")!
     }
 
     init() {
