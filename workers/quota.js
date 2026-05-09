@@ -100,6 +100,7 @@ async function handleQuota(env) {
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
+          "User-Agent": "RedFluent-Quota-Proxy/1.0",
         },
         cf: { cacheTtl: CACHE_SECONDS, cacheEverything: false },
       }
