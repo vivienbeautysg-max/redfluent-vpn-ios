@@ -1,0 +1,54 @@
+"app.title" = "RedFluent VPN";
+"app.tagline" = "Private secure tunnel for trusted devices";
+
+"activation.title" = "Enter your invite code";
+"activation.description" = "RedFluent VPN is private invite-only software. Each device receives its own revocable profile.";
+"activation.placeholder" = "RF-XXXX-XXXX";
+"activation.button" = "Activate";
+"activation.error.empty" = "Invite code is empty";
+"activation.error.network" = "Network unavailable, please try again";
+
+"status.disconnected" = "Disconnected";
+"status.connecting" = "Connecting";
+"status.connected" = "Connected";
+"status.disconnecting" = "Disconnecting";
+"status.failed" = "Needs attention";
+
+"detail.disconnected" = "Tap Connect to start the secure tunnel.";
+"detail.connecting" = "Establishing the encrypted tunnel.";
+"detail.connected" = "Your device is using the RedFluent secure tunnel.";
+"detail.disconnecting" = "Closing the tunnel.";
+"detail.failed" = "Open Diagnostics for details.";
+
+"button.connect" = "Connect";
+"button.disconnect" = "Disconnect";
+
+"card.server" = "Server";
+"card.mode" = "Mode";
+"card.provider" = "Provider";
+"card.mode.value" = "Secure Tunnel";
+
+"diagnostics.title" = "Diagnostics";
+"diagnostics.tunnel" = "Tunnel";
+"diagnostics.activation" = "Activation";
+"diagnostics.device" = "Device";
+"diagnostics.error" = "Last error";
+"diagnostics.copy" = "Copy diagnostics";
+"diagnostics.none" = "No recent error";
+"diagnostics.done" = "Done";
+
+"menu.diagnostics" = "Diagnostics";
+"menu.signout" = "Sign out";
+"signout.confirm.title" = "Remove activation from this device?";
+"signout.confirm.message" = "Your invite remains valid. You can re-activate by entering the same invite code.";
+"signout.confirm.action" = "Sign out";
+"signout.confirm.cancel" = "Cancel";
+
+"revoked.title" = "Access revoked";
+"revoked.message" = "This device's RedFluent VPN access has been disabled. Contact RedFluent support to re-enable, or enter a different invite code.";
+"revoked.button" = "Enter a different invite";
+"revoked.support" = "Contact support";
+
+"footer.privacy" = "Privacy";
+"footer.terms" = "Terms";
+"footer.support" = "Support";

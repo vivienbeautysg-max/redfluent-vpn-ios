@@ -1,0 +1,54 @@
+"app.title" = "RedFluent VPN";
+"app.tagline" = "为信任设备打造的私有安全隧道";
+
+"activation.title" = "请输入邀请码";
+"activation.description" = "RedFluent VPN 是邀请制私有软件。每台设备获得独立、可吊销的访问凭证。";
+"activation.placeholder" = "RF-XXXX-XXXX";
+"activation.button" = "激活";
+"activation.error.empty" = "邀请码不能为空";
+"activation.error.network" = "网络连接失败,请检查后重试";
+
+"status.disconnected" = "未连接";
+"status.connecting" = "正在连接";
+"status.connected" = "已连接";
+"status.disconnecting" = "正在断开";
+"status.failed" = "需要处理";
+
+"detail.disconnected" = "点击连接按钮以启动安全隧道";
+"detail.connecting" = "正在建立加密隧道";
+"detail.connected" = "您的设备正在使用 RedFluent 安全隧道";
+"detail.disconnecting" = "正在关闭隧道";
+"detail.failed" = "请打开诊断查看详情";
+
+"button.connect" = "连接";
+"button.disconnect" = "断开";
+
+"card.server" = "服务器";
+"card.mode" = "模式";
+"card.provider" = "提供方";
+"card.mode.value" = "安全隧道";
+
+"diagnostics.title" = "诊断";
+"diagnostics.tunnel" = "隧道";
+"diagnostics.activation" = "激活";
+"diagnostics.device" = "设备";
+"diagnostics.error" = "最近错误";
+"diagnostics.copy" = "复制诊断信息";
+"diagnostics.none" = "无错误";
+"diagnostics.done" = "完成";
+
+"menu.diagnostics" = "诊断";
+"menu.signout" = "退出激活";
+"signout.confirm.title" = "从此设备移除激活?";
+"signout.confirm.message" = "您的邀请码仍然有效。重新输入即可再次激活。";
+"signout.confirm.action" = "退出";
+"signout.confirm.cancel" = "取消";
+
+"revoked.title" = "访问已撤销";
+"revoked.message" = "本设备的 RedFluent VPN 访问权限已被禁用。请联系 RedFluent 支持以重新启用,或输入新的邀请码。";
+"revoked.button" = "输入新邀请码";
+"revoked.support" = "联系支持";
+
+"footer.privacy" = "隐私";
+"footer.terms" = "条款";
+"footer.support" = "支持";

@@ -2,20 +2,39 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var onboardingDone: Bool = UserDefaults.standard.bool(forKey: "rfv.onboardingDone")
 
     var body: some View {
+        Group {
+            if !onboardingDone {
+                OnboardingView(done: $onboardingDone)
+            } else {
+                switch appState.activation {
+                case .notActivated, .activating, .error:
+                    InviteActivationView()
+                case .activated:
+                    MainDashboardView()
+                case .revoked:
+                    RevokedView()
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: onboardingDone)
+        .animation(.easeInOut(duration: 0.3), value: stateKey)
+    }
+
+    private var stateKey: String {
         switch appState.activation {
-        case .notActivated, .activating, .error:
-            InviteActivationView()
-        case .activated:
-            MainDashboardView()
-        case .revoked:
-            RevokedView()
+        case .notActivated:  return "notActivated"
+        case .activating:    return "activating"
+        case .activated:     return "activated"
+        case .revoked:       return "revoked"
+        case .error:         return "error"
         }
     }
 }
 
-private struct RevokedView: View {
+struct RevokedView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {

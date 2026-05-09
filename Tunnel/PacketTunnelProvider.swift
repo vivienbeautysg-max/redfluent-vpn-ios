@@ -13,7 +13,11 @@ import os.log
 /// `redfluent-vpn/docs/vpn-engine-decision.md` for the full plan.
 /// The integration shape is sketched below behind `#if HAS_SINGBOX`.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
-    private let logger = Logger(subsystem: "com.redfluent.vpn.tunnel", category: "PacketTunnelProvider")
+    let logger = Logger(subsystem: "com.redfluent.vpn.tunnel", category: "PacketTunnelProvider")
+
+    #if HAS_SINGBOX
+    var boxService: AnyObject?  // typed as LibboxService when framework linked
+    #endif
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called, options=\(String(describing: options))")
