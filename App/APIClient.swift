@@ -216,6 +216,10 @@ actor APIClient {
         )
     }
 
+    func fetchQuota(token: String) async throws -> QuotaSnapshot {
+        try await get(path: "/device/quota?fresh=1", token: token)
+    }
+
     func createInvite(code: String, label: String?, maxDevices: Int, monthlyQuotaGB: Int, token: String) async throws -> CreatedInvite {
         struct Request: Encodable {
             let code: String

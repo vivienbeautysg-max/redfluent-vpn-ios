@@ -4,6 +4,8 @@ import Foundation
 /// in `workers/quota.js`. All fields are required — the Worker always
 /// emits the full shape on success.
 struct QuotaSnapshot: Codable, Equatable {
+    var scope: String?
+    var isUnlimited: Bool?
     var monthlyQuotaGB: Double
     var usedGB: Double
     var usedBytes: Int64

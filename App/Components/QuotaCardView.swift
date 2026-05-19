@@ -1,15 +1,14 @@
 import SwiftUI
 
-/// Monthly bandwidth quota card. Pulls its data from `QuotaStore` in
-/// the environment. Shows a traffic-light progress bar, headline
-/// "used / total · N days left", and an outgoing/incoming split.
+/// Monthly bandwidth quota card. Owners see global server traffic; invited
+/// devices see their own usage against the quota assigned to that invite.
 struct QuotaCardView: View {
+    let profile: DeviceProfile?
+
     @EnvironmentObject private var quotaStore: QuotaStore
 
     var body: some View {
-        if !quotaStore.isConfigured {
-            // Worker not deployed yet — hide the card entirely rather than
-            // surface a misleading error from the placeholder URL.
+        if profile == nil {
             EmptyView()
         } else {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -25,27 +24,23 @@ struct QuotaCardView: View {
             }
             .card()
             .onAppear {
-                // Avoid stacking cold-start fetches: only kick a refresh if
-                // we have nothing yet AND there isn't one already in flight.
                 if quotaStore.snapshot == nil && !quotaStore.isFetching {
-                    quotaStore.refresh()
+                    quotaStore.refresh(profile: profile)
                 }
             }
         }
     }
 
-    // MARK: - Header
-
     private var header: some View {
         HStack {
             Image(systemName: "gauge.with.dots.needle.67percent")
                 .foregroundStyle(Theme.Color.brandPrimary)
-            Text("Monthly Bandwidth")
+            Text(headerTitle)
                 .font(Theme.Font.titleLarge)
                 .foregroundStyle(Theme.Color.brandPrimary)
             Spacer()
             Button {
-                quotaStore.refresh()
+                quotaStore.refresh(profile: profile)
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .foregroundStyle(Theme.Color.brandPrimary)
@@ -62,24 +57,27 @@ struct QuotaCardView: View {
         }
     }
 
-    // MARK: - Content
-
     @ViewBuilder
     private func content(_ snap: QuotaSnapshot) -> some View {
-        let pct = max(0, min(snap.percentUsed, 1))
-        let tint = barTint(for: pct)
+        if !(snap.isUnlimited ?? false) {
+            let pct = max(0, min(snap.percentUsed, 1))
+            ProgressView(value: pct)
+                .progressViewStyle(.linear)
+                .tint(barTint(for: pct))
+                .scaleEffect(x: 1, y: 1.6, anchor: .center)
+                .padding(.vertical, Theme.Spacing.xs)
+        }
 
-        ProgressView(value: pct)
-            .progressViewStyle(.linear)
-            .tint(tint)
-            .scaleEffect(x: 1, y: 1.6, anchor: .center)
-            .padding(.vertical, Theme.Spacing.xs)
-
-        HStack {
-            Text("\(formatGB(snap.usedGB)) / \(formatGB(snap.monthlyQuotaGB))")
-                .font(Theme.Font.bodyLarge)
-                .fontWeight(.semibold)
-                .foregroundStyle(Theme.Color.textPrimary)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(headlineText(for: snap))
+                    .font(Theme.Font.bodyLarge)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                Text(subtitleText(for: snap))
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
             Spacer()
             Text("\(snap.daysUntilReset) day\(snap.daysUntilReset == 1 ? "" : "s") left")
                 .font(Theme.Font.caption)
@@ -110,12 +108,10 @@ struct QuotaCardView: View {
         }
     }
 
-    // MARK: - Empty / error states
-
     private var loadingState: some View {
         HStack(spacing: Theme.Spacing.sm) {
             ProgressView().controlSize(.small)
-            Text("Fetching quota…")
+            Text("Fetching quota...")
                 .font(Theme.Font.body)
                 .foregroundStyle(Theme.Color.textSecondary)
             Spacer()
@@ -143,7 +139,39 @@ struct QuotaCardView: View {
         .padding(.vertical, Theme.Spacing.sm)
     }
 
-    // MARK: - Helpers
+    private var headerTitle: String {
+        switch quotaScope {
+        case "server":
+            return "Server Bandwidth"
+        default:
+            return "My Bandwidth"
+        }
+    }
+
+    private var quotaScope: String {
+        if let scope = quotaStore.snapshot?.scope {
+            return scope
+        }
+        return profile?.ownerLabel == "Owner" ? "server" : "device"
+    }
+
+    private func headlineText(for snap: QuotaSnapshot) -> String {
+        if snap.isUnlimited ?? false {
+            return "\(formatGB(snap.usedGB)) used"
+        }
+        return "\(formatGB(snap.usedGB)) / \(formatGB(snap.monthlyQuotaGB))"
+    }
+
+    private func subtitleText(for snap: QuotaSnapshot) -> String {
+        if snap.isUnlimited ?? false {
+            return quotaScope == "server"
+                ? "Used server traffic with no monthly cap"
+                : "My usage with no monthly cap"
+        }
+        return quotaScope == "server"
+            ? "Used / total server traffic"
+            : "My usage / assigned monthly quota"
+    }
 
     private func barTint(for percent: Double) -> Color {
         switch percent {
@@ -172,9 +200,6 @@ struct QuotaCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Format a GB value with grouped thousands. Two decimals under
-    /// 1,000 GB, integer above (matches the spec sample
-    /// "1.36 GB" / "2,048 GB").
     private func formatGB(_ value: Double) -> String {
         let nf = NumberFormatter()
         nf.numberStyle = .decimal

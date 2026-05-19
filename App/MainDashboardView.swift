@@ -24,7 +24,7 @@ struct MainDashboardView: View {
                     statusLabel
                     serverCard
                     StatsCardView()
-                    QuotaCardView()
+                    QuotaCardView(profile: appState.currentProfile)
                     profileCard
                     Spacer(minLength: Theme.Spacing.xl)
                     privacyFootnote
@@ -83,7 +83,7 @@ struct MainDashboardView: View {
                 await appState.refresh()
                 statsStore.refresh()
                 await statsStore.ping()
-                quotaStore.refresh()
+                quotaStore.refresh(profile: appState.currentProfile)
                 statsStore.startAutoRefresh()
                 startHeartbeat()
             }
@@ -95,7 +95,7 @@ struct MainDashboardView: View {
                 if phase == .active {
                     statsStore.refresh()
                     Task { await statsStore.ping() }
-                    quotaStore.refresh()
+                    quotaStore.refresh(profile: appState.currentProfile)
                     statsStore.startAutoRefresh()
                     startHeartbeat()
                 } else {
