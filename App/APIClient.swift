@@ -142,7 +142,9 @@ actor APIClient {
         cfg.timeoutIntervalForRequest = 15
         cfg.timeoutIntervalForResource = 30
         self.session = URLSession(configuration: cfg)
-        self.decoder = JSONDecoder()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
     }
 
     func redeemInvite(code: String, devicePublicId: String, deviceName: String, appVersion: String) async throws -> DeviceProfile {
