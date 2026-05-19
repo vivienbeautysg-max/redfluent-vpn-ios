@@ -33,8 +33,11 @@ final class TunnelManager: ObservableObject {
 
     func loadStatus() async {
         do {
-            let manager = try await loadOrCreateManager()
-            status = TunnelStatus(neStatus: manager.connection.status)
+            if let manager = try await loadExistingManager() {
+                status = TunnelStatus(neStatus: manager.connection.status)
+            } else {
+                status = .disconnected
+            }
         } catch {
             lastError = error.localizedDescription
             status = .failed
@@ -63,17 +66,25 @@ final class TunnelManager: ObservableObject {
     func disconnect() async {
         status = .disconnecting
         do {
-            let manager = try await loadOrCreateManager()
-            manager.connection.stopVPNTunnel()
+            if let manager = try await loadExistingManager() {
+                manager.connection.stopVPNTunnel()
+                status = .disconnecting
+            } else {
+                status = .disconnected
+            }
         } catch {
             lastError = error.localizedDescription
             status = .failed
         }
     }
 
-    private func loadOrCreateManager() async throws -> NETunnelProviderManager {
+    private func loadExistingManager() async throws -> NETunnelProviderManager? {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        let manager = managers.first ?? NETunnelProviderManager()
+        return managers.first
+    }
+
+    private func loadOrCreateManager() async throws -> NETunnelProviderManager {
+        let manager = try await loadExistingManager() ?? NETunnelProviderManager()
 
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
