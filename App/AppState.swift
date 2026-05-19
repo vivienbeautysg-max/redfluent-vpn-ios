@@ -27,7 +27,7 @@ final class AppState: ObservableObject {
     }
 
     func redeem(inviteCode: String) async {
-        let trimmed = inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let trimmed = inviteCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             lastActivationError = "Invite code is empty"
             return

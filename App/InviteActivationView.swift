@@ -66,8 +66,8 @@ struct InviteActivationView: View {
                 .font(Theme.Font.body)
                 .foregroundStyle(Theme.Color.textSecondary)
 
-            TextField("RF-XXXX-XXXX", text: $inviteCode)
-                .textInputAutocapitalization(.characters)
+            TextField("Invite code", text: $inviteCode)
+                .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(Theme.Font.monoBody)
                 .padding(.horizontal, Theme.Spacing.md)

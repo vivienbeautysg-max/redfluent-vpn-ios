@@ -7,7 +7,10 @@ struct MainDashboardView: View {
     @EnvironmentObject private var quotaStore: QuotaStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingDiagnostics = false
+    @State private var showingCreateInvite = false
+    @State private var showingOwnerAdmin = false
     @State private var showingSignOutConfirm = false
+    @State private var heartbeatTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -35,6 +38,14 @@ struct MainDashboardView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        if appState.currentProfile?.ownerLabel == "Owner" {
+                            Button { showingOwnerAdmin = true } label: {
+                                Label("Owner admin", systemImage: "person.badge.key")
+                            }
+                            Button { showingCreateInvite = true } label: {
+                                Label("Create invite", systemImage: "plus.circle")
+                            }
+                        }
                         Button { showingDiagnostics = true } label: {
                             Label("Diagnostics", systemImage: "stethoscope")
                         }
@@ -51,6 +62,14 @@ struct MainDashboardView: View {
             .sheet(isPresented: $showingDiagnostics) {
                 DiagnosticsView()
             }
+            .sheet(isPresented: $showingCreateInvite) {
+                CreateInviteView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $showingOwnerAdmin) {
+                OwnerAdminView()
+                    .environmentObject(appState)
+            }
             .confirmationDialog("Remove activation from this device?",
                                 isPresented: $showingSignOutConfirm,
                                 titleVisibility: .visible) {
@@ -66,9 +85,11 @@ struct MainDashboardView: View {
                 await statsStore.ping()
                 quotaStore.refresh()
                 statsStore.startAutoRefresh()
+                startHeartbeat()
             }
             .onDisappear {
                 statsStore.stopAutoRefresh()
+                stopHeartbeat()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
@@ -76,8 +97,10 @@ struct MainDashboardView: View {
                     Task { await statsStore.ping() }
                     quotaStore.refresh()
                     statsStore.startAutoRefresh()
+                    startHeartbeat()
                 } else {
                     statsStore.stopAutoRefresh()
+                    stopHeartbeat()
                 }
             }
         }
@@ -161,6 +184,35 @@ struct MainDashboardView: View {
             Text(value).fontWeight(.medium)
         }
         .font(Theme.Font.body)
+    }
+
+    private func startHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task {
+            while !Task.isCancelled {
+                await sendHeartbeat()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        Task { await sendHeartbeat(forceDisconnected: true) }
+    }
+
+    private func sendHeartbeat(forceDisconnected: Bool = false) async {
+        guard let token = appState.currentProfile?.token else { return }
+        let snap = statsStore.snapshot
+        let connected = forceDisconnected ? false : (tunnelManager.status == .connected && (snap?.connected ?? true))
+        try? await APIClient.shared.sendHeartbeat(
+            connected: connected,
+            activeConnections: snap?.activeConnections,
+            totalUp: snap?.totalUp,
+            totalDown: snap?.totalDown,
+            token: token
+        )
     }
 }
 
