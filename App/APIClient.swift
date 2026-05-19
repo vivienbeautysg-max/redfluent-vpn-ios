@@ -390,7 +390,7 @@ actor APIClient {
     }
 
     private func post<B: Encodable, R: Decodable>(path: String, body: B, token: String?) async throws -> R {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        var req = URLRequest(url: try requestURL(path: path))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
@@ -399,10 +399,28 @@ actor APIClient {
     }
 
     private func get<R: Decodable>(path: String, token: String?) async throws -> R {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        var req = URLRequest(url: try requestURL(path: path))
         req.httpMethod = "GET"
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         return try await send(req)
+    }
+
+    private func requestURL(path: String) throws -> URL {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            throw APIError.invalidURL
+        }
+
+        let pieces = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawPath = String(pieces.first ?? "")
+        let normalizedPath = rawPath.hasPrefix("/") ? rawPath : "/\(rawPath)"
+        let basePath = components.path == "/" ? "" : components.path
+        components.path = basePath + normalizedPath
+        components.percentEncodedQuery = pieces.count > 1 ? String(pieces[1]) : nil
+
+        guard let url = components.url else {
+            throw APIError.invalidURL
+        }
+        return url
     }
 
     private func send<R: Decodable>(_ request: URLRequest) async throws -> R {
