@@ -73,9 +73,37 @@ enum APIError: Error, LocalizedError {
         switch self {
         case .invalidURL:                return "Invalid API URL"
         case .transport(let err):        return "Network error: \(err.localizedDescription)"
-        case .status(let code, let msg): return "Server error \(code): \(msg)"
+        case .status(let code, let msg): return APIError.statusMessage(code: code, rawMessage: msg)
         case .decoding(let err):         return "Bad response: \(err.localizedDescription)"
         }
+    }
+
+    private static func statusMessage(code: Int, rawMessage: String) -> String {
+        let reason = serverReason(from: rawMessage)
+        switch reason {
+        case "invalid invite":
+            return "Invite code was not found. Check the code and try again."
+        case "invite disabled":
+            return "This invite has been disabled by the owner."
+        case "invite expired":
+            return "This invite has expired."
+        case "invite device limit reached":
+            return "This invite has reached its device limit. Ask the owner to raise the limit or revoke an old device."
+        case "owner device cannot be revoked here":
+            return "Owner devices are protected and cannot be revoked here."
+        default:
+            return "Server error \(code): \(reason)"
+        }
+    }
+
+    private static func serverReason(from rawMessage: String) -> String {
+        guard let data = rawMessage.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = object["error"] as? String
+        else {
+            return rawMessage
+        }
+        return error
     }
 }
 
@@ -204,9 +232,10 @@ actor APIClient {
         return invites
     }
 
-    func updateOwnerInvite(_ invite: OwnerInvite, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async throws -> OwnerInvite {
+    func updateOwnerInvite(_ invite: OwnerInvite, newCode: String, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async throws -> OwnerInvite {
         struct Request: Encodable {
             let code: String
+            let newCode: String
             let label: String
             let maxDevices: Int
             let monthlyQuotaGB: Int
@@ -219,13 +248,33 @@ actor APIClient {
         }
         let env: Envelope = try await post(
             path: "/owner/invites/update",
-            body: Request(code: invite.code, label: label, maxDevices: maxDevices, monthlyQuotaGB: monthlyQuotaGB, enabled: enabled),
+            body: Request(code: invite.code, newCode: newCode, label: label, maxDevices: maxDevices, monthlyQuotaGB: monthlyQuotaGB, enabled: enabled),
             token: token
         )
         guard env.ok, let updated = env.invite else {
             throw APIError.status(403, env.error ?? "update invite rejected")
         }
         return updated
+    }
+
+    func deleteOwnerInvite(_ invite: OwnerInvite, token: String) async throws -> Int {
+        struct Request: Encodable {
+            let code: String
+        }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let revokedDevices: Int?
+        }
+        let env: Envelope = try await post(
+            path: "/owner/invites/delete",
+            body: Request(code: invite.code),
+            token: token
+        )
+        guard env.ok else {
+            throw APIError.status(403, env.error ?? "delete invite rejected")
+        }
+        return env.revokedDevices ?? 0
     }
 
     func fetchOwnerDevices(token: String) async throws -> [OwnerDevice] {
@@ -258,6 +307,26 @@ actor APIClient {
         )
         guard env.ok, let device = env.device else {
             throw APIError.status(403, env.error ?? "rename device rejected")
+        }
+        return device
+    }
+
+    func revokeOwnerDevice(profileId: String, token: String) async throws -> OwnerDevice {
+        struct Request: Encodable {
+            let profileId: String
+        }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let device: OwnerDevice?
+        }
+        let env: Envelope = try await post(
+            path: "/owner/devices/revoke",
+            body: Request(profileId: profileId),
+            token: token
+        )
+        guard env.ok, let device = env.device else {
+            throw APIError.status(403, env.error ?? "revoke device rejected")
         }
         return device
     }

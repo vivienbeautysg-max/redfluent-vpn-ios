@@ -24,22 +24,38 @@ final class OwnerAdminViewModel: ObservableObject {
         isLoading = false
     }
 
-    func updateInvite(_ invite: OwnerInvite, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async {
+    func updateInvite(_ invite: OwnerInvite, newCode: String, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async -> Bool {
         do {
             let updated = try await api.updateOwnerInvite(
                 invite,
+                newCode: newCode,
                 label: label,
                 maxDevices: maxDevices,
                 monthlyQuotaGB: monthlyQuotaGB,
                 enabled: enabled,
                 token: token
             )
-            if let idx = invites.firstIndex(where: { $0.code == updated.code }) {
+            if let idx = invites.firstIndex(where: { $0.code == invite.code || $0.code == updated.code }) {
                 invites[idx] = updated
             }
             errorMessage = nil
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteInvite(_ invite: OwnerInvite, token: String) async -> Bool {
+        do {
+            _ = try await api.deleteOwnerInvite(invite, token: token)
+            invites.removeAll { $0.code == invite.code }
+            devices.removeAll { $0.inviteCode == invite.code }
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -56,6 +72,33 @@ final class OwnerAdminViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func revokeDevice(_ device: OwnerDevice, token: String) async -> Bool {
+        do {
+            let updated = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
+            if let idx = devices.firstIndex(where: { $0.profileId == updated.profileId }) {
+                devices[idx] = updated
+            }
+            if let inviteIdx = invites.firstIndex(where: { $0.code == updated.inviteCode }) {
+                let invite = invites[inviteIdx]
+                invites[inviteIdx] = OwnerInvite(
+                    code: invite.code,
+                    label: invite.label,
+                    maxDevices: invite.maxDevices,
+                    activeDevices: max(0, invite.activeDevices - 1),
+                    monthlyQuotaGB: invite.monthlyQuotaGB,
+                    enabled: invite.enabled,
+                    expiresAt: invite.expiresAt,
+                    createdAt: invite.createdAt
+                )
+            }
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 }
@@ -143,22 +186,29 @@ struct OwnerAdminView: View {
                     .environmentObject(appState)
             }
             .sheet(item: $inviteToEdit) { invite in
-                EditInviteView(invite: invite) { label, maxDevices, monthlyQuotaGB, enabled in
-                    guard let token = appState.currentProfile?.token else { return }
-                    await model.updateInvite(
+                EditInviteView(invite: invite) { newCode, label, maxDevices, monthlyQuotaGB, enabled in
+                    guard let token = appState.currentProfile?.token else { return false }
+                    return await model.updateInvite(
                         invite,
+                        newCode: newCode,
                         label: label,
                         maxDevices: maxDevices,
                         monthlyQuotaGB: monthlyQuotaGB,
                         enabled: enabled,
                         token: token
                     )
+                } onDelete: {
+                    guard let token = appState.currentProfile?.token else { return false }
+                    return await model.deleteInvite(invite, token: token)
                 }
             }
             .sheet(item: $deviceToRename) { device in
-                RenameDeviceView(device: device) { name in
+                ManageDeviceView(device: device) { name in
                     guard let token = appState.currentProfile?.token else { return }
                     await model.renameDevice(device, displayName: name, token: token)
+                } onRevoke: {
+                    guard let token = appState.currentProfile?.token else { return false }
+                    return await model.revokeDevice(device, token: token)
                 }
             }
             .task { await refresh() }
@@ -259,18 +309,28 @@ private struct OwnerDeviceRow: View {
 
 private struct EditInviteView: View {
     let invite: OwnerInvite
-    let onSave: (String, Int, Int, Bool) async -> Void
+    let onSave: (String, String, Int, Int, Bool) async -> Bool
+    let onDelete: () async -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @State private var code: String
     @State private var label: String
     @State private var maxDevices: Int
     @State private var monthlyQuotaGB: Int
     @State private var enabled: Bool
     @State private var isSaving = false
+    @State private var isDeleting = false
+    @State private var showingDeleteConfirm = false
 
-    init(invite: OwnerInvite, onSave: @escaping (String, Int, Int, Bool) async -> Void) {
+    init(
+        invite: OwnerInvite,
+        onSave: @escaping (String, String, Int, Int, Bool) async -> Bool,
+        onDelete: @escaping () async -> Bool
+    ) {
         self.invite = invite
         self.onSave = onSave
+        self.onDelete = onDelete
+        _code = State(initialValue: invite.code)
         _label = State(initialValue: invite.label)
         _maxDevices = State(initialValue: invite.maxDevices)
         _monthlyQuotaGB = State(initialValue: invite.monthlyQuotaGB ?? 200)
@@ -281,14 +341,54 @@ private struct EditInviteView: View {
         NavigationStack {
             Form {
                 Section("Invite") {
-                    LabeledContent("Code", value: invite.code)
+                    TextField("Code", text: $code)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .disabled(isOwnerRootInvite)
                     TextField("Label", text: $label)
                     Stepper("Device limit: \(maxDevices)", value: $maxDevices, in: 1...100)
                     Stepper("Monthly limit: \(monthlyQuotaGB) GB", value: $monthlyQuotaGB, in: 1...2000, step: 50)
                     Toggle("Enabled", isOn: $enabled)
                 }
+                if isOwnerRootInvite {
+                    Section {
+                        Text("The owner invite is protected and cannot be renamed or deleted.")
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                } else {
+                    Section {
+                        Button(role: .destructive) {
+                            showingDeleteConfirm = true
+                        } label: {
+                            if isDeleting {
+                                ProgressView()
+                            } else {
+                                Label("Delete invite", systemImage: "trash")
+                            }
+                        }
+                        .disabled(isDeleting || isSaving)
+                    }
+                }
             }
             .navigationTitle("Edit Invite")
+            .confirmationDialog(
+                "Delete invite?",
+                isPresented: $showingDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Invite", role: .destructive) {
+                    isDeleting = true
+                    Task {
+                        let ok = await onDelete()
+                        isDeleting = false
+                        if ok { dismiss() }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the invite from Owner Admin and revokes devices created from it.")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -297,31 +397,53 @@ private struct EditInviteView: View {
                     Button {
                         isSaving = true
                         Task {
-                            await onSave(label, maxDevices, monthlyQuotaGB, enabled)
+                            let ok = await onSave(
+                                code.trimmingCharacters(in: .whitespacesAndNewlines),
+                                label.trimmingCharacters(in: .whitespacesAndNewlines),
+                                maxDevices,
+                                monthlyQuotaGB,
+                                enabled
+                            )
                             isSaving = false
-                            dismiss()
+                            if ok { dismiss() }
                         }
                     } label: {
                         if isSaving { ProgressView() } else { Text("Save") }
                     }
-                    .disabled(isSaving || label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSaving || isDeleting || trimmedCode.isEmpty || label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
     }
+
+    private var trimmedCode: String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isOwnerRootInvite: Bool {
+        invite.code == "RF-OWNER-2026"
+    }
 }
 
-private struct RenameDeviceView: View {
+private struct ManageDeviceView: View {
     let device: OwnerDevice
     let onSave: (String) async -> Void
+    let onRevoke: () async -> Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var displayName: String
     @State private var isSaving = false
+    @State private var isRevoking = false
+    @State private var showingRevokeConfirm = false
 
-    init(device: OwnerDevice, onSave: @escaping (String) async -> Void) {
+    init(
+        device: OwnerDevice,
+        onSave: @escaping (String) async -> Void,
+        onRevoke: @escaping () async -> Bool
+    ) {
         self.device = device
         self.onSave = onSave
+        self.onRevoke = onRevoke
         _displayName = State(initialValue: device.displayName)
     }
 
@@ -334,8 +456,45 @@ private struct RenameDeviceView: View {
                     LabeledContent("Invite", value: device.inviteLabel ?? device.inviteCode)
                     LabeledContent("Status", value: device.inUse ? "In use" : "Not active")
                 }
+                if isOwnerDevice {
+                    Section {
+                        Text("Owner devices are protected so you cannot lock yourself out of Owner Admin.")
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                } else {
+                    Section {
+                        Button(role: .destructive) {
+                            showingRevokeConfirm = true
+                        } label: {
+                            if isRevoking {
+                                ProgressView()
+                            } else {
+                                Label("Revoke device", systemImage: "xmark.shield")
+                            }
+                        }
+                        .disabled(isSaving || isRevoking || !device.enabled)
+                    }
+                }
             }
-            .navigationTitle("Rename Device")
+            .navigationTitle("Manage Device")
+            .confirmationDialog(
+                "Revoke device?",
+                isPresented: $showingRevokeConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Revoke Device", role: .destructive) {
+                    isRevoking = true
+                    Task {
+                        let ok = await onRevoke()
+                        isRevoking = false
+                        if ok { dismiss() }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This disables VPN access for this device and frees one slot on its invite.")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -355,6 +514,10 @@ private struct RenameDeviceView: View {
                 }
             }
         }
+    }
+
+    private var isOwnerDevice: Bool {
+        device.inviteCode == "RF-OWNER-2026"
     }
 }
 
