@@ -92,9 +92,9 @@ cat > build/exportOptions.plist <<'EOF'
   <key>provisioningProfiles</key>
   <dict>
     <key>com.redfluent.vpn</key>
-    <string>RedFluent VPN App Store</string>
+    <string>RedFluent VPN App Store CLI 20260519044354</string>
     <key>com.redfluent.vpn.tunnel</key>
-    <string>RedFluent VPN Tunnel App Store</string>
+    <string>RedFluent VPN Tunnel App Store CLI 20260519044354</string>
   </dict>
   <key>uploadSymbols</key>
   <true/>
