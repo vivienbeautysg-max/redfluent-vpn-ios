@@ -63,6 +63,26 @@ struct OwnerDevice: Codable, Equatable, Identifiable {
     let revokedAt: String?
 }
 
+struct OwnerActivationEvent: Codable, Equatable, Identifiable {
+    let id: String
+    let inviteCodeInput: String?
+    let inviteCodeNormalized: String?
+    let matchedInviteCode: String?
+    let devicePublicId: String?
+    let deviceName: String?
+    let appVersion: String?
+    let outcome: String
+    let reason: String?
+    let httpStatus: Int
+    let profileId: String?
+    let activeDevices: Int?
+    let maxDevices: Int?
+    let remoteIp: String?
+    let userAgent: String?
+    let createdAt: String
+    let createdAtSgt: String
+}
+
 enum APIError: Error, LocalizedError {
     case invalidURL
     case transport(Error)
@@ -288,6 +308,19 @@ actor APIClient {
             throw APIError.status(403, env.error ?? "owner devices rejected")
         }
         return devices
+    }
+
+    func fetchOwnerActivationEvents(token: String) async throws -> [OwnerActivationEvent] {
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let events: [OwnerActivationEvent]?
+        }
+        let env: Envelope = try await get(path: "/owner/activation-events?limit=80", token: token)
+        guard env.ok, let events = env.events else {
+            throw APIError.status(403, env.error ?? "activation events rejected")
+        }
+        return events
     }
 
     func renameOwnerDevice(profileId: String, displayName: String, token: String) async throws -> OwnerDevice {

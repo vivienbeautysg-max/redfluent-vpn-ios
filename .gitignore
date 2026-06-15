@@ -11,3 +11,5 @@ Frameworks/
 # Bundled VPN config contains production VLESS+Reality credentials; never commit
 Tunnel/Resources/*.json
 Tunnel/Resources/*.plist
+
+build/

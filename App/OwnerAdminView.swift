@@ -5,6 +5,7 @@ import UIKit
 final class OwnerAdminViewModel: ObservableObject {
     @Published var invites: [OwnerInvite] = []
     @Published var devices: [OwnerDevice] = []
+    @Published var activationEvents: [OwnerActivationEvent] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
 
@@ -16,8 +17,10 @@ final class OwnerAdminViewModel: ObservableObject {
         do {
             async let inviteList = api.fetchOwnerInvites(token: token)
             async let deviceList = api.fetchOwnerDevices(token: token)
+            async let activationList = api.fetchOwnerActivationEvents(token: token)
             invites = try await inviteList
             devices = try await deviceList
+            activationEvents = try await activationList
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -145,6 +148,16 @@ struct OwnerAdminView: View {
                     }
                 }
 
+                Section("Activation Events") {
+                    if model.activationEvents.isEmpty && !model.isLoading {
+                        Text("No activation attempts recorded yet")
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                    ForEach(model.activationEvents) { event in
+                        OwnerActivationEventRow(event: event)
+                    }
+                }
+
                 Section("Devices") {
                     if model.devices.isEmpty && !model.isLoading {
                         Text("No activated devices yet")
@@ -218,6 +231,86 @@ struct OwnerAdminView: View {
     private func refresh() async {
         guard let token = appState.currentProfile?.token else { return }
         await model.refresh(token: token)
+    }
+}
+
+private struct OwnerActivationEventRow: View {
+    let event: OwnerActivationEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(alignment: .top, spacing: Theme.Spacing.sm) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(primaryCode)
+                        .font(Theme.Font.monoBody)
+                        .foregroundStyle(Theme.Color.textPrimary)
+                    if let matched = event.matchedInviteCode, matched != primaryCode {
+                        Text("Matched: \(matched)")
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.textSecondary)
+                    }
+                }
+                Spacer()
+                Text(event.outcome == "success" ? "Success" : "Failed")
+                    .font(Theme.Font.micro)
+                    .padding(.horizontal, Theme.Spacing.sm)
+                    .padding(.vertical, Theme.Spacing.xs)
+                    .background(statusColor.opacity(0.14))
+                    .foregroundStyle(statusColor)
+                    .clipShape(Capsule())
+            }
+
+            Text(reasonSummary)
+                .font(Theme.Font.caption)
+                .foregroundStyle(statusColor)
+
+            HStack(spacing: Theme.Spacing.md) {
+                if let deviceName = event.deviceName, !deviceName.isEmpty {
+                    detail("Device", deviceName)
+                }
+                if let appVersion = event.appVersion, !appVersion.isEmpty {
+                    detail("App", appVersion)
+                }
+                if let active = event.activeDevices, let max = event.maxDevices {
+                    detail("Devices", "\(active)/\(max)")
+                }
+            }
+
+            HStack(spacing: Theme.Spacing.md) {
+                if let remoteIp = event.remoteIp, !remoteIp.isEmpty {
+                    detail("IP", remoteIp)
+                }
+                Text(event.createdAtSgt)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xs)
+    }
+
+    private var primaryCode: String {
+        if let input = event.inviteCodeInput, !input.isEmpty {
+            return input
+        }
+        if let normalized = event.inviteCodeNormalized, !normalized.isEmpty {
+            return normalized
+        }
+        return "Unknown invite"
+    }
+
+    private var reasonSummary: String {
+        let reason = event.reason ?? "unknown"
+        return "HTTP \(event.httpStatus) - \(reason)"
+    }
+
+    private var statusColor: Color {
+        event.outcome == "success" ? Theme.Color.success : Theme.Color.danger
+    }
+
+    private func detail(_ label: String, _ value: String) -> some View {
+        Text("\(label): \(value)")
+            .font(Theme.Font.caption)
+            .foregroundStyle(Theme.Color.textSecondary)
     }
 }
 
@@ -301,10 +394,35 @@ private struct OwnerDeviceRow: View {
 
     private var statusText: String {
         if !device.enabled { return "Revoked" }
-        if let last = device.lastHeartbeatAt { return "Seen \(last)" }
-        if let last = device.lastSeenAt { return "Activated \(last)" }
+        if let last = device.lastHeartbeatAt { return "Seen \(displayServerTime(last))" }
+        if let last = device.lastSeenAt { return "Activated \(displayServerTime(last))" }
         return "Inactive"
     }
+}
+
+private let serverUTCFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return formatter
+}()
+
+private let sgtFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(identifier: "Asia/Singapore")
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'SGT'"
+    return formatter
+}()
+
+private func displayServerTime(_ raw: String) -> String {
+    guard let date = serverUTCFormatter.date(from: raw) else {
+        return raw
+    }
+    return sgtFormatter.string(from: date)
 }
 
 private struct EditInviteView: View {
