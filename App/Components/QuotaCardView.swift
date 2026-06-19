@@ -5,6 +5,7 @@ import SwiftUI
 /// "used / total · N days left", and an outgoing/incoming split.
 struct QuotaCardView: View {
     @EnvironmentObject private var quotaStore: QuotaStore
+    @EnvironmentObject private var appState: AppState
 
     var body: some View {
         if !quotaStore.isConfigured {
@@ -28,7 +29,7 @@ struct QuotaCardView: View {
                 // Avoid stacking cold-start fetches: only kick a refresh if
                 // we have nothing yet AND there isn't one already in flight.
                 if quotaStore.snapshot == nil && !quotaStore.isFetching {
-                    quotaStore.refresh()
+                    quotaStore.refresh(token: appState.currentProfile?.token)
                 }
             }
         }
@@ -45,7 +46,7 @@ struct QuotaCardView: View {
                 .foregroundStyle(Theme.Color.brandPrimary)
             Spacer()
             Button {
-                quotaStore.refresh()
+                quotaStore.refresh(token: appState.currentProfile?.token)
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .foregroundStyle(Theme.Color.brandPrimary)
@@ -84,6 +85,19 @@ struct QuotaCardView: View {
             Text("\(snap.daysUntilReset) day\(snap.daysUntilReset == 1 ? "" : "s") left")
                 .font(Theme.Font.caption)
                 .foregroundStyle(Theme.Color.textSecondary)
+        }
+
+        if let selfUsed = snap.selfUsedGB {
+            HStack {
+                Text("This device")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                Text(selfUsageText(used: selfUsed, quota: snap.selfQuotaGB))
+                    .font(Theme.Font.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Theme.Color.textPrimary)
+            }
         }
 
         Divider()
@@ -175,6 +189,11 @@ struct QuotaCardView: View {
     /// Format a GB value with grouped thousands. Two decimals under
     /// 1,000 GB, integer above (matches the spec sample
     /// "1.36 GB" / "2,048 GB").
+    private func selfUsageText(used: Double, quota: Double?) -> String {
+        if let quota, quota > 0 { return "\(formatGB(used)) / \(formatGB(quota))" }
+        return formatGB(used)
+    }
+
     private func formatGB(_ value: Double) -> String {
         let nf = NumberFormatter()
         nf.numberStyle = .decimal

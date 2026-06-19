@@ -83,7 +83,7 @@ struct MainDashboardView: View {
                 await appState.refresh()
                 statsStore.refresh()
                 await statsStore.ping()
-                quotaStore.refresh()
+                quotaStore.refresh(token: appState.currentProfile?.token)
                 statsStore.startAutoRefresh()
                 startHeartbeat()
             }
@@ -95,7 +95,7 @@ struct MainDashboardView: View {
                 if phase == .active {
                     statsStore.refresh()
                     Task { await statsStore.ping() }
-                    quotaStore.refresh()
+                    quotaStore.refresh(token: appState.currentProfile?.token)
                     statsStore.startAutoRefresh()
                     startHeartbeat()
                 } else {
@@ -205,7 +205,7 @@ struct MainDashboardView: View {
     private func sendHeartbeat(forceDisconnected: Bool = false) async {
         guard let token = appState.currentProfile?.token else { return }
         let snap = statsStore.snapshot
-        let connected = forceDisconnected ? false : (tunnelManager.status == .connected && (snap?.connected ?? true))
+        let connected = forceDisconnected ? false : (tunnelManager.status == .connected && (snap?.connected ?? false))
         try? await APIClient.shared.sendHeartbeat(
             connected: connected,
             activeConnections: snap?.activeConnections,

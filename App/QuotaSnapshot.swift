@@ -15,4 +15,7 @@ struct QuotaSnapshot: Codable, Equatable {
     var incomingBytes: Int64
     var outgoingBytes: Int64
     var fetchedAt: Date
+    // Owner-only: the owner's own device usage alongside the server total.
+    var selfUsedGB: Double? = nil
+    var selfQuotaGB: Double? = nil
 }

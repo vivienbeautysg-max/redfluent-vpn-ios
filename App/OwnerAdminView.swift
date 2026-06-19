@@ -158,7 +158,7 @@ struct OwnerAdminView: View {
                     }
                 }
 
-                Section("Devices") {
+                Section(devicesHeader) {
                     if model.devices.isEmpty && !model.isLoading {
                         Text("No activated devices yet")
                             .foregroundStyle(Theme.Color.textSecondary)
@@ -226,6 +226,11 @@ struct OwnerAdminView: View {
             }
             .task { await refresh() }
         }
+    }
+
+    private var devicesHeader: String {
+        let n = model.devices.filter { ($0.online ?? $0.inUse) && $0.enabled }.count
+        return n > 0 ? "Devices \u{00B7} \(n) online" : "Devices"
     }
 
     private func refresh() async {
@@ -364,15 +369,15 @@ private struct OwnerDeviceRow: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack {
                 Circle()
-                    .fill(device.inUse ? Theme.Color.success : Theme.Color.textSecondary.opacity(0.35))
+                    .fill(isOnline ? Theme.Color.success : Theme.Color.textSecondary.opacity(0.35))
                     .frame(width: 10, height: 10)
                 Text(device.displayName)
                     .font(Theme.Font.bodyLarge)
                     .foregroundStyle(Theme.Color.textPrimary)
                 Spacer()
-                Text(device.inUse ? "In use" : statusText)
+                Text(isOnline ? "Online" : statusText)
                     .font(Theme.Font.micro)
-                    .foregroundStyle(device.inUse ? Theme.Color.success : Theme.Color.textSecondary)
+                    .foregroundStyle(isOnline ? Theme.Color.success : Theme.Color.textSecondary)
             }
             Text(device.profileId)
                 .font(Theme.Font.monoBody)
@@ -391,6 +396,8 @@ private struct OwnerDeviceRow: View {
         }
         .padding(.vertical, Theme.Spacing.xs)
     }
+
+    private var isOnline: Bool { device.online ?? device.inUse }
 
     private var statusText: String {
         if !device.enabled { return "Revoked" }

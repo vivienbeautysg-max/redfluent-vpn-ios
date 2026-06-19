@@ -53,26 +53,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func startWithoutEngine() async throws {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "45.32.31.229")
-        settings.mtu = 1500
-        let ipv4 = NEIPv4Settings(addresses: ["10.255.0.2"], subnetMasks: ["255.255.255.0"])
-        ipv4.includedRoutes = [NEIPv4Route.default()]
-        settings.ipv4Settings = ipv4
-        let dns = NEDNSSettings(servers: ["1.1.1.1", "1.0.0.1"])
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
-        try await setTunnelNetworkSettings(settings)
-        logger.warning("HAS_LIBBOX not set; tunnel is a no-op stub")
+        // No real engine linked — fail loudly instead of bringing up a tunnel
+        // that captures traffic but routes nothing (a fake "Connected" with no
+        // internet). Production builds always define HAS_LIBBOX.
+        logger.error("HAS_LIBBOX not set — refusing to start a no-op tunnel")
+        throw NSError(domain: "rfv.tunnel", code: 500,
+                      userInfo: [NSLocalizedDescriptionKey: "VPN engine not linked; cannot start tunnel."])
     }
 
     #if HAS_LIBBOX
     private func startWithLibbox() async throws {
-        // 1. Resolve config (bundled JSON for now; future: fetch from /profile)
-        let configContent = try loadConfig()
+        // 1. Resolve config — per-device from backend, else bundled fallback.
+        let configContent = try await loadConfig()
 
         // 2. Compute paths in extension's own sandbox container (no App Group needed)
-        let containerURL = FileManager.default
-            .urls(for: .libraryDirectory, in: .userDomainMask).first!
+        guard let containerURL = FileManager.default
+            .urls(for: .libraryDirectory, in: .userDomainMask).first else {
+            throw NSError(domain: "rfv.tunnel", code: 103,
+                          userInfo: [NSLocalizedDescriptionKey: "no library directory in container"])
+        }
         let basePath = containerURL.path
         let workingPath = containerURL.appendingPathComponent("sing-box-working").path
         let tempPath = containerURL.appendingPathComponent("sing-box-temp").path
@@ -85,7 +84,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         setupOptions.basePath = basePath
         setupOptions.workingPath = workingPath
         setupOptions.tempPath = tempPath
-        setupOptions.logMaxLines = 3000
+        setupOptions.logMaxLines = 500
         setupOptions.debug = false
         setupOptions.crashReportSource = "RedFluentNetworkExtension"
         setupOptions.oomKillerEnabled = true
@@ -134,13 +133,44 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func loadConfig() throws -> String {
+    private func loadConfig() async throws -> String {
+        // Prefer a per-device config from the backend (carries this device's own
+        // uuid, so revoking it server-side actually cuts the tunnel). Fall back
+        // to the bundled shared config on ANY failure so the tunnel still comes up.
+        if let perDevice = await fetchPerDeviceConfigData() {
+            return try injectClashAPI(into: perDevice)
+        }
         guard let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
               let data = try? Data(contentsOf: url) else {
             throw NSError(domain: "rfv.tunnel", code: 200,
                           userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
         }
         return try injectClashAPI(into: data)
+    }
+
+    /// Fetch this device's sing-box config from the backend, using the token the
+    /// app passed via providerConfiguration. Returns nil on any failure so the
+    /// caller falls back to the bundled config.
+    private func fetchPerDeviceConfigData() async -> Data? {
+        let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        guard let token = cfg?["token"] as? String,
+              let base = cfg?["apiBase"] as? String,
+              let url = URL(string: base + "/device/runtime-config") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 8
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  obj["ok"] as? Bool == true,
+                  let rc = obj["runtimeConfig"] else { return nil }
+            logger.info("using per-device config from backend")
+            return try JSONSerialization.data(withJSONObject: rc)
+        } catch {
+            logger.warning("per-device config fetch failed; using bundled: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// Parse the bundled config JSON, ensure `experimental.clash_api` exists

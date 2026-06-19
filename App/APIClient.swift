@@ -52,6 +52,7 @@ struct OwnerDevice: Codable, Equatable, Identifiable {
     let enabled: Bool
     let connected: Bool
     let inUse: Bool
+    let online: Bool?
     let lastSeenAt: String?
     let lastHeartbeatAt: String?
     let lastConnectedAt: String?
@@ -385,8 +386,13 @@ actor APIClient {
         }
     }
 
+    private func apiURL(_ path: String) -> URL {
+        // appendingPathComponent percent-encodes "?" and breaks query strings; build the URL directly.
+        URL(string: baseURL.absoluteString + path) ?? baseURL.appendingPathComponent(path)
+    }
+
     private func post<B: Encodable, R: Decodable>(path: String, body: B, token: String?) async throws -> R {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        var req = URLRequest(url: apiURL(path))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
@@ -395,7 +401,7 @@ actor APIClient {
     }
 
     private func get<R: Decodable>(path: String, token: String?) async throws -> R {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        var req = URLRequest(url: apiURL(path))
         req.httpMethod = "GET"
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         return try await send(req)

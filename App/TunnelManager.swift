@@ -33,8 +33,13 @@ final class TunnelManager: ObservableObject {
 
     func loadStatus() async {
         do {
-            let manager = try await loadOrCreateManager()
-            status = TunnelStatus(neStatus: manager.connection.status)
+            // Read-only: do NOT re-save preferences just to check status
+            // (saving re-prompts the iOS VPN permission sheet and churns config).
+            if let manager = try await loadManager() {
+                status = TunnelStatus(neStatus: manager.connection.status)
+            } else {
+                status = .disconnected
+            }
         } catch {
             lastError = error.localizedDescription
             status = .failed
@@ -52,7 +57,9 @@ final class TunnelManager: ObservableObject {
     func connect() async {
         status = .connecting
         do {
-            let manager = try await loadOrCreateManager()
+            // onDemand: true = iOS keeps the tunnel up (auto-reconnect on drop /
+            // network change) and does not leak traffic outside it (kill-switch).
+            let manager = try await loadOrCreateConfiguredManager(onDemand: true)
             try manager.connection.startVPNTunnel()
         } catch {
             lastError = error.localizedDescription
@@ -63,7 +70,9 @@ final class TunnelManager: ObservableObject {
     func disconnect() async {
         status = .disconnecting
         do {
-            let manager = try await loadOrCreateManager()
+            // Clear on-demand FIRST so iOS doesn't immediately re-establish the
+            // tunnel, then stop it. Without this the user can't actually turn it off.
+            let manager = try await loadOrCreateConfiguredManager(onDemand: false)
             manager.connection.stopVPNTunnel()
         } catch {
             lastError = error.localizedDescription
@@ -71,22 +80,42 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    private func loadOrCreateManager() async throws -> NETunnelProviderManager {
+    /// Read-only load of the existing tunnel manager (no save). Returns nil if
+    /// the user has never configured the tunnel yet.
+    private func loadManager() async throws -> NETunnelProviderManager? {
+        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+        return managers.first
+    }
+
+    /// Load-or-create the tunnel manager, apply our configuration, set the
+    /// on-demand (kill-switch / auto-reconnect) state, and persist. Only called
+    /// from connect()/disconnect() — never from a plain status read.
+    private func loadOrCreateConfiguredManager(onDemand: Bool) async throws -> NETunnelProviderManager {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
         let manager = managers.first ?? NETunnelProviderManager()
 
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
         proto.serverAddress = "RedFluent Tokyo"
-        proto.providerConfiguration = [
-            "configProfile": "review-safe-profile-v1"
-        ]
+        var providerConfig: [String: Any] = ["configProfile": "review-safe-profile-v1"]
+        // Pass the device token + API base so the tunnel extension can fetch a
+        // per-device sing-box config (its own uuid) from the backend. The
+        // extension falls back to the bundled config if this is absent or fails.
+        if let profile = ProfileStore.load() {
+            providerConfig["token"] = profile.token
+            providerConfig["apiBase"] = "https://vpn-api.redfluent.com"
+        }
+        proto.providerConfiguration = providerConfig
         proto.disconnectOnSleep = false
 
         manager.localizedDescription = tunnelDescription
         manager.protocolConfiguration = proto
         manager.isEnabled = true
-        manager.isOnDemandEnabled = false
+        // Kill-switch + auto-reconnect: while the user wants the VPN on, mark it
+        // on-demand so iOS re-establishes it on drop/network-change and blocks
+        // traffic from leaking outside the tunnel. Cleared on explicit disconnect.
+        manager.isOnDemandEnabled = onDemand
+        manager.onDemandRules = onDemand ? [NEOnDemandRuleConnect()] : []
 
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()

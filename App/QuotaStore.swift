@@ -54,7 +54,7 @@ final class QuotaStore: ObservableObject {
             self.clientSecret = nil
         }
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 5
+        cfg.timeoutIntervalForRequest = 15
         cfg.urlCache = URLCache(memoryCapacity: 64 * 1024, diskCapacity: 0, directory: nil)
         self.session = URLSession(configuration: cfg)
         loadFromDisk()
@@ -66,7 +66,7 @@ final class QuotaStore: ObservableObject {
         self.endpoint = endpoint
         self.clientSecret = clientSecret
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 5
+        cfg.timeoutIntervalForRequest = 15
         cfg.urlCache = URLCache(memoryCapacity: 64 * 1024, diskCapacity: 0, directory: nil)
         self.session = URLSession(configuration: cfg)
         loadFromDisk()
@@ -75,7 +75,7 @@ final class QuotaStore: ObservableObject {
     /// Kick off a refresh. Cancels any in-flight fetch first so the latest
     /// caller wins (the dashboard pull-to-refresh shouldn't queue behind
     /// a slow earlier request).
-    func refresh() {
+    func refresh(token: String? = nil) {
         guard let endpoint else {
             // Worker not yet deployed — silently no-op so the card can hide
             // itself rather than surface a fake error.
@@ -103,8 +103,8 @@ final class QuotaStore: ObservableObject {
                 req.httpMethod = "GET"
                 req.cachePolicy = .reloadIgnoringLocalCacheData
                 req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-                if let secret = self.clientSecret {
-                    req.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+                if let token = token {
+                    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                 }
                 let (data, response) = try await self.session.data(for: req)
                 if Task.isCancelled { return }
