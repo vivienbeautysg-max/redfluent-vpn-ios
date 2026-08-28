@@ -12,7 +12,15 @@ targets:
     type: application
     platform: iOS
     sources:
-      - App
+      - path: App
+        excludes:
+          - "**/*.bak*"
+          - "**/*.orig"
+          - "**/*.rej"
+          - "**/*.log"
+          - "**/*.tmp*"
+          - "**/*.swp"
+          - "**/.backups/**"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.redfluent.vpn
@@ -34,6 +42,13 @@ targets:
       - path: Tunnel
         excludes:
           - Resources
+          - "**/*.bak*"
+          - "**/*.orig"
+          - "**/*.rej"
+          - "**/*.log"
+          - "**/*.tmp*"
+          - "**/*.swp"
+          - "**/.backups/**"
       - path: Tunnel/Resources
         optional: true
         buildPhase: resources

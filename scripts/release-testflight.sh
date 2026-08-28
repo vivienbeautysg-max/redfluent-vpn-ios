@@ -93,6 +93,9 @@ codesign -f -s - --entitlements Entitlements/RedFluentVPN.entitlements "$APP_PAT
 echo "==> Exporting IPA through temporary clean keychain"
 bash scripts/export-appstore-ipa.sh "$PATCHED_ARCHIVE" "$EXPORT_DIR"
 
+echo "==> Release gate: checking IPA for stray source/backup files"
+bash scripts/verify-ipa-clean.sh "$EXPORT_DIR/RedFluentVPN.ipa"
+
 echo "==> Validating IPA with Apple"
 xcrun altool --validate-app "$EXPORT_DIR/RedFluentVPN.ipa" \
   --apiKey "$ASC_API_KEY" \

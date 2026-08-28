@@ -13,3 +13,11 @@ Tunnel/Resources/*.json
 Tunnel/Resources/*.plist
 
 build/
+
+# 本地备份/临时文件：绝不进仓库，也绝不进 app bundle（见 scripts/verify-ipa-clean.sh）
+.backups/
+*.bak
+*.bak-*
+*.orig
+*.rej
+*.tmp.sh
