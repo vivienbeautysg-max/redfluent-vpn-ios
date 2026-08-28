@@ -2,7 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var onboardingDone: Bool = UserDefaults.standard.bool(forKey: "rfv.onboardingDone")
+    @State private var onboardingDone: Bool = {
+        #if DEBUG
+        if ScreenshotMode.isOn { return !ScreenshotMode.wantsOnboardingShot }
+        #endif
+        return UserDefaults.standard.bool(forKey: "rfv.onboardingDone")
+    }()
 
     var body: some View {
         Group {

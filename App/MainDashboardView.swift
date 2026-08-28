@@ -6,11 +6,13 @@ struct MainDashboardView: View {
     @EnvironmentObject private var statsStore: StatsStore
     @EnvironmentObject private var quotaStore: QuotaStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showingDiagnostics = false
     @State private var showingCreateInvite = false
     @State private var showingOwnerAdmin = false
     @State private var showingSignOutConfirm = false
     @State private var heartbeatTask: Task<Void, Never>?
+    @State private var appleLinkError: String?
 
     var body: some View {
         NavigationStack {
@@ -26,6 +28,9 @@ struct MainDashboardView: View {
                     StatsCardView()
                     QuotaCardView()
                     profileCard
+                    if FeatureFlags.appleSignInEnabled && !appState.appleLinked {
+                        appleLinkCard
+                    }
                     Spacer(minLength: Theme.Spacing.xl)
                     privacyFootnote
                 }
@@ -135,6 +140,35 @@ struct MainDashboardView: View {
             row(icon: "shield.lefthalf.filled", label: "Mode", value: "Secure Tunnel")
             Divider()
             row(icon: "antenna.radiowaves.left.and.right", label: "Provider", value: "RedFluent")
+        }
+        .card()
+    }
+
+    // 只在还没绑定时出现，绑好之后这张卡就永远消失 —— 不留常驻入口。
+    private var appleLinkCard: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack {
+                Image(systemName: "iphone.and.arrow.forward")
+                    .foregroundStyle(Theme.Color.brandPrimary)
+                Text("换手机时自动恢复")
+                    .font(Theme.Font.titleLarge)
+                Spacer()
+            }
+            AppleRecoverButton(
+                onLightBackground: colorScheme != .dark,
+                onToken: { token in
+                    appleLinkError = nil
+                    Task { await appState.linkApple(identityToken: token) }
+                },
+                onError: { message in
+                    appleLinkError = message
+                }
+            )
+            if let appleLinkError {
+                Text(appleLinkError)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.danger)
+            }
         }
         .card()
     }

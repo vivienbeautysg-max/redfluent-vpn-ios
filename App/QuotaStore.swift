@@ -7,6 +7,11 @@ import Foundation
 @MainActor
 final class QuotaStore: ObservableObject {
     @Published private(set) var snapshot: QuotaSnapshot?
+
+    #if DEBUG
+    /// 仅供 App Store 截图注入演示数据；Release 包里不存在。
+    func injectForScreenshot(_ s: QuotaSnapshot) { snapshot = s }
+    #endif
     @Published private(set) var lastError: String?
     @Published private(set) var isFetching = false
 

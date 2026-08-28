@@ -131,6 +131,14 @@ enum APIError: Error, LocalizedError {
 actor APIClient {
     static let shared = APIClient()
 
+    // 后端在 token 接近过期时，会在任何一个认证响应里附带 `renewedToken`。
+    // 在这里统一接住，调用方就不必在每个响应类型里都声明这个字段。
+    private var onTokenRenewed: (@Sendable (String) async -> Void)?
+
+    func setTokenRenewalHandler(_ handler: @escaping @Sendable (String) async -> Void) {
+        onTokenRenewed = handler
+    }
+
     private let session: URLSession
     private let decoder: JSONDecoder
 
@@ -184,6 +192,74 @@ actor APIClient {
             monthlyQuotaGB: env.monthlyQuotaGB,
             expiresAt: env.expiresAt
         )
+    }
+
+    /// 把本设备已持有的邀请码绑定到一个 Apple ID，供以后换手机时自助恢复。
+    /// 需要当前有效的设备 token —— 只能绑定你本来就合法拥有的邀请码。
+    func linkApple(identityToken: String, token: String) async throws {
+        struct Request: Encodable { let appleIdentityToken: String }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let linked: Bool?
+        }
+        let env: Envelope = try await post(path: "/device/link-apple",
+                                           body: Request(appleIdentityToken: identityToken),
+                                           token: token)
+        guard env.ok, env.linked == true else {
+            throw APIError.status(403, env.error ?? "link rejected")
+        }
+    }
+
+    /// 换机 / 重装后仅凭 Apple ID 恢复。Apple 登录本身不授予访问权，
+    /// 它只是找回这个人原本就有的邀请码，随后服务端照常校验该邀请码的全部规则。
+    func authApple(identityToken: String, devicePublicId: String, deviceName: String, appVersion: String) async throws -> DeviceProfile {
+        struct Request: Encodable {
+            let appleIdentityToken: String
+            let devicePublicId: String
+            let deviceName: String
+            let appVersion: String
+        }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let profileId: String?
+            let token: String?
+            let ownerLabel: String?
+            let serverRegion: String?
+            let configVersion: String?
+            let monthlyQuotaGB: Int?
+            let expiresAt: String?
+        }
+        let body = Request(appleIdentityToken: identityToken, devicePublicId: devicePublicId,
+                           deviceName: deviceName, appVersion: appVersion)
+        let env: Envelope = try await post(path: "/auth/apple", body: body, token: nil)
+        guard env.ok,
+              let profileId = env.profileId,
+              let token = env.token,
+              let ownerLabel = env.ownerLabel,
+              let region = env.serverRegion,
+              let configVersion = env.configVersion
+        else {
+            throw APIError.status(403, env.error ?? "apple recovery rejected")
+        }
+        return DeviceProfile(
+            profileId: profileId,
+            token: token,
+            ownerLabel: ownerLabel,
+            serverRegion: region,
+            configVersion: configVersion,
+            monthlyQuotaGB: env.monthlyQuotaGB,
+            expiresAt: env.expiresAt
+        )
+    }
+
+    private static func renewedToken(in data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = obj["renewedToken"] as? String,
+              !token.isEmpty
+        else { return nil }
+        return token
     }
 
     func fetchProfile(token: String) async throws -> ProfileStatus {
@@ -421,6 +497,11 @@ actor APIClient {
         guard (200...299).contains(http.statusCode) else {
             let bodyText = String(data: data, encoding: .utf8) ?? ""
             throw APIError.status(http.statusCode, bodyText)
+        }
+        // 滑动续期：先看后端有没有塞回新 token，再解码正常业务响应。
+        // 放在解码之前，这样即使某个响应类型解码失败，续期也不会丢。
+        if let renewed = Self.renewedToken(in: data) {
+            await onTokenRenewed?(renewed)
         }
         do {
             return try decoder.decode(R.self, from: data)

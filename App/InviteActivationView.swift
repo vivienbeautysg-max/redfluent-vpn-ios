@@ -15,6 +15,9 @@ struct InviteActivationView: View {
                     headline
                     Spacer(minLength: Theme.Spacing.lg)
                     activationCard
+                    if FeatureFlags.appleSignInEnabled {
+                        appleRecoverSection
+                    }
                     privacyFootnote
                     Spacer(minLength: Theme.Spacing.lg)
                 }
@@ -112,6 +115,25 @@ struct InviteActivationView: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
         }
         .disabled(isBusy)
+    }
+
+    // 换了手机的人走这条：不用再回去找 owner 要邀请码。
+    private var appleRecoverSection: some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            Text("换了手机？")
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Color.textOnBrand.opacity(0.85))
+            AppleRecoverButton(
+                onLightBackground: false,
+                onToken: { token in
+                    Task { await appState.recoverWithApple(identityToken: token) }
+                },
+                onError: { message in
+                    appState.lastActivationError = message
+                }
+            )
+        }
+        .padding(.horizontal, Theme.Spacing.sm)
     }
 
     private var privacyFootnote: some View {
