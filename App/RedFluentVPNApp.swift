@@ -31,6 +31,11 @@ struct RedFluentVPNApp: App {
                     guard expired, tunnelManager.status.isConnected else { return }
                     Task { await tunnelManager.disconnect() }
                 }
+                .onChange(of: appState.signedOut) { _, signedOut in
+                    // The server signed this device out: stop the tunnel and drop its saved credentials too.
+                    guard signedOut else { return }
+                    Task { await tunnelManager.stopForSignOut() }
+                }
                 .task {
                     #if DEBUG
                     if ScreenshotMode.isOn {
@@ -48,7 +53,7 @@ struct RedFluentVPNApp: App {
     }
 
     /// The tunnel stopped because the server ended access. /profile says what that means: Expired state, or
-    /// Revoked screen. A "revoked" stop with a profile that is fine only meant a stale login token in the
+    /// back to the activation screen (signed out). A "revoked" stop with a profile that is fine only meant a stale login token in the
     /// tunnel's saved configuration, so start again once with the current one.
     private func handleServerStop(_ stop: ServerStop) async {
         let answered = await appState.refresh()

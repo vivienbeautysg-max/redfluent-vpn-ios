@@ -7,7 +7,6 @@ final class AppState: ObservableObject {
         case notActivated
         case activating
         case activated(DeviceProfile)
-        case revoked
         case error(String)
     }
 
@@ -18,6 +17,10 @@ final class AppState: ObservableObject {
     @Published private(set) var selectedRegionID: String = RegionPolicy.defaultID
     /// Account expiry from the last /profile (1.2 backends): drives the Expired state on the dashboard.
     @Published private(set) var expiry: ExpiryInfo = .none
+    /// The server signed this device out: the activation screen shows a short notice until the next activation.
+    @Published private(set) var signedOut = false
+    /// Owner Admin: is the Invites section open? Collapsed by default, remembered while the app runs.
+    @Published var ownerInvitesExpanded = false
 
     private let api = APIClient.shared
 
@@ -30,7 +33,8 @@ final class AppState: ObservableObject {
         expiry = ExpiryStore.load()
         #if DEBUG
         if ScreenshotMode.isOn {
-            activation = .activated(ScreenshotMode.profile)
+            activation = ScreenshotMode.startsSignedOut ? .notActivated : .activated(ScreenshotMode.profile)
+            signedOut = ScreenshotMode.startsSignedOut
             appleLinked = true          // 截图里不出现绑定卡片
             regions = ScreenshotMode.regions
             selectedRegionID = ScreenshotMode.selectedRegionID
@@ -122,6 +126,7 @@ final class AppState: ObservableObject {
                 appVersion: DeviceIdentity.appVersion
             )
             try ProfileStore.save(profile)
+            signedOut = false
             activation = .activated(profile)
             appleLinked = true
             UserDefaults.standard.set(true, forKey: "rfv.appleLinked")
@@ -153,6 +158,7 @@ final class AppState: ObservableObject {
                 appVersion: DeviceIdentity.appVersion
             )
             try ProfileStore.save(profile)
+            signedOut = false
             activation = .activated(profile)
         } catch {
             lastActivationError = error.localizedDescription
@@ -170,9 +176,12 @@ final class AppState: ObservableObject {
         do {
             let status = try await api.fetchProfile(token: profile.token)
             if !status.enabled {
+                // The server signed this device out (Log out / revoke): back to the activation screen with a short
+                // notice. The invite code stays valid; entering it again re-activates.
                 ProfileStore.clear()
                 resetRegions()
-                activation = .revoked
+                signedOut = true
+                activation = .notActivated
             } else {
                 applyOfferedRegions(status.regions)
                 applyExpiry(ExpiryInfo(expired: status.expired, expiresAt: status.expiresAt, daysLeft: status.daysLeft))
@@ -190,6 +199,7 @@ final class AppState: ObservableObject {
     func signOut() {
         ProfileStore.clear()
         resetRegions()
+        signedOut = false
         activation = .notActivated
         lastActivationError = nil
     }

@@ -664,6 +664,125 @@ check(InviteRegionOptions.options(ownerRegions: both, current: nil).map(\.id) ==
 check(InviteRegionOptions.options(ownerRegions: [.tokyo], current: "singapore").map(\.id) == ["tokyo", "singapore"], "an invite already on Singapore still shows it")
 check(InviteRegionOptions.options(ownerRegions: both, current: "SINGAPORE").map(\.id) == ["tokyo", "singapore"], "current region matched case-insensitively")
 
+// MARK: 21. SPEC3: last use per device
+
+section("21. lastUsedAt: present / null / absent / malformed")
+
+let spec3Now = Date(timeIntervalSince1970: 1_800_000_000)
+let isoFormatter = ISO8601DateFormatter()
+func ago(_ seconds: TimeInterval) -> String { isoFormatter.string(from: spec3Now.addingTimeInterval(-seconds)) }
+
+func dev(_ id: String, _ label: String, used: Double, last: String?, includeLast: Bool = true,
+         enabled: Bool = true, online: Bool = false) -> String {
+    var extra = ",\"usage\":{\"usedGB\":\(used),\"quotaGB\":200,\"percent\":null}"
+    if includeLast { extra += last.map { ",\"lastUsedAt\":\"\($0)\"" } ?? ",\"lastUsedAt\":null" }
+    if online { extra += ",\"online\":true" }
+    return device(id, label: label, name: "dev-" + id, model: "M", app: "1", enabled: enabled)
+        .replacingOccurrences(of: "__USAGE__", with: extra)
+}
+
+do {
+    let r = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + [
+        dev("p1", "P", used: 1, last: "2026-10-22T06:00:00.000Z"),
+        dev("p2", "P", used: 1, last: nil),
+        dev("p3", "P", used: 1, last: nil, includeLast: false),
+    ].joined(separator: ",") + "]}")
+    check(r.lastUsed["p1"]?.date == ISODate.parse("2026-10-22T06:00:00.000Z") && r.lastUsed["p1"]?.date != nil, "lastUsedAt decodes to a date")
+    check(r.lastUsed["p2"] == DeviceLastUsed(iso: nil), "null = reported, never used")
+    check(r.lastUsed["p3"] == nil, "absent = the backend does not say")
+    check(r.devices?.count == 3 && r.usage.count == 3, "the device list and usage are unaffected")
+    let malformed = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":["
+        + device("m1", label: "M", name: "m", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: ",\"usage\":{\"usedGB\":3},\"lastUsedAt\":12345")
+        + "]}")
+    check(malformed.devices?.count == 1 && malformed.lastUsed["m1"] == nil && malformed.usage["m1"]?.usedGB == 3,
+          "a wrong-typed lastUsedAt is read as 'not reported' (not as Never) and breaks nothing")
+    let oldBackend = try decode(OwnerDevicesResponse.self, oldDevices)
+    check(oldBackend.lastUsed.isEmpty, "older backend: no lastUsedAt at all")
+} catch { check(false, "lastUsedAt decoding threw: \(error)") }
+check(ISODate.parse("2026-10-22 08:30:00") == ISODate.parse("2026-10-22T08:30:00Z"), "the server's other timestamp style (UTC) parses too")
+
+section("22. users list: sort, grouping, online, last used")
+
+do {
+    let r = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + [
+        dev("a1", "Alpha", used: 100, last: ago(7_200)),
+        dev("a2", "Alpha", used: 50, last: ago(60), online: true),
+        dev("b1", "Bravo", used: 100, last: ago(5 * 86_400)),
+        dev("b2", "Bravo", used: 50, last: ago(86_400), enabled: false, online: true),
+        dev("c1", "Charlie", used: 150, last: nil),
+        dev("d1", "Delta", used: 200, last: ago(10 * 86_400)),
+        dev("e1", "Echo", used: 0, last: nil),
+        dev("f1", "Foxtrot", used: 0, last: nil),
+        dev("g1", "Golf", used: 10, last: ago(100)),
+        dev("g2", "Golf", used: 5, last: nil).replacingOccurrences(of: "CODE-Golf", with: "CODE-Golf2"),
+    ].joined(separator: ",") + "]}")
+    let users = UsageMetrics.groups(devices: r.devices ?? [], usage: r.usage, lastUsed: r.lastUsed)
+    check(users.map(\.label) == ["Delta", "Alpha", "Bravo", "Charlie", "Golf", "Echo", "Foxtrot"],
+          "users by total used desc; equal totals: most recent last use first, never-used last; then by name: \(users.map(\.label))")
+    let alpha = users.first(where: { $0.label == "Alpha" })!
+    check(alpha.totalGB == 150 && alpha.online && alpha.devicesText == "2 devices", "Alpha: total 150, online, 2 devices")
+    check(alpha.lastUsedAt == ISODate.parse(ago(60)), "user's last use = the most recent of its devices")
+    let bravo = users.first(where: { $0.label == "Bravo" })!
+    check(bravo.totalGB == 150, "a signed-out device's usage still counts in the total")
+    check(bravo.activeDevices == 1 && bravo.devicesText == "1 device", "signed-out devices are not counted as active")
+    check(!bravo.online, "a signed-out device never makes the user online")
+    check(bravo.rows.first(where: { $0.id == "b2" })?.enabled == false && bravo.rows.first(where: { $0.id == "b2" })?.online == false,
+          "the signed-out device row is not online")
+    check(bravo.lastUsedAt == ISODate.parse(ago(86_400)), "last use still includes the signed-out device")
+    let charlie = users.first(where: { $0.label == "Charlie" })!
+    check(charlie.lastUsedAt == nil && charlie.lastUsedReported, "never used but the backend reports it")
+    let golf = users.first(where: { $0.label == "Golf" })!
+    check(golf.inviteCodes == ["CODE-Golf", "CODE-Golf2"], "distinct invite codes, sorted")
+    check(users.first(where: { $0.label == "Alpha" })?.inviteCodes == ["CODE-Alpha"], "one invite code for a user with one invite")
+    let unreported = UsageMetrics.groups(devices: r.devices ?? [], usage: r.usage)
+    check(unreported.allSatisfy { !$0.lastUsedReported } && unreported.map(\.label).first == "Delta", "no lastUsedAt from the backend: not reported, order by usage")
+    check(unreported.allSatisfy { g in
+        ActivityText.text(online: g.online, lastUsedAt: g.lastUsedAt, reported: g.lastUsedReported, now: spec3Now).map { $0 == "Online" } ?? true
+    }, "not reported: no 'Last used' / 'Never' text (only Online may show)")
+    check(UsageMetrics.ranksBefore(users[0], users[1]) && !UsageMetrics.ranksBefore(users[1], users[0]), "ranksBefore is a strict order")
+} catch { check(false, "users list decoding threw: \(error)") }
+
+section("23. relative time + activity text")
+
+func rel(_ seconds: TimeInterval) -> String { RelativeTime.text(from: spec3Now.addingTimeInterval(-seconds), now: spec3Now, timeZone: utc) }
+check(rel(0) == "just now" && rel(59) == "just now", "under a minute -> just now")
+check(rel(60) == "1m ago" && rel(3_599) == "59m ago", "minutes")
+check(rel(3_600) == "1h ago" && rel(7_200) == "2h ago" && rel(86_399) == "23h ago", "hours (2h ago)")
+check(rel(86_400) == "1d ago" && rel(29 * 86_400) == "29d ago", "days")
+check(rel(30 * 86_400) == ISODate.dayText(date: spec3Now.addingTimeInterval(-30 * 86_400), timeZone: utc) && !rel(30 * 86_400).hasSuffix("ago"),
+      "a month or more -> a date")
+check(RelativeTime.text(from: spec3Now.addingTimeInterval(500), now: spec3Now, timeZone: utc) == "just now", "a time in the future (clock skew) -> just now")
+check(ActivityText.text(online: true, lastUsedAt: nil, reported: false, now: spec3Now) == "Online", "online wins")
+check(ActivityText.text(online: false, lastUsedAt: spec3Now.addingTimeInterval(-7_200), reported: true, now: spec3Now, timeZone: utc) == "Last used 2h ago", "Last used 2h ago")
+check(ActivityText.text(online: false, lastUsedAt: nil, reported: true, now: spec3Now) == "Never", "null -> Never")
+check(ActivityText.text(online: false, lastUsedAt: nil, reported: false, now: spec3Now) == nil, "not reported -> nothing")
+check(ActivityText.text(online: false, lastUsedAt: spec3Now, reported: false, now: spec3Now) == nil, "not reported -> nothing even with a date")
+
+section("24. log out: fallback for a backend without POST /owner/users/logout, texts, landing notice")
+
+check(LogoutPlan.needsFallback(APIError.status(404, "Cannot POST /owner/users/logout")), "404 -> fall back to per-device revoke")
+check(!LogoutPlan.needsFallback(APIError.status(403, "owner invite cannot be logged out")), "403 (owner invite) is a real refusal, no fallback")
+check(!LogoutPlan.needsFallback(APIError.status(500, "")) && !LogoutPlan.needsFallback(APIError.status(401, "")), "5xx / 401 -> no fallback")
+check(!LogoutPlan.needsFallback(APIError.invalidURL) && !LogoutPlan.needsFallback(APIError.transport(URLError(.notConnectedToInternet))), "other errors -> no fallback")
+do {
+    let r = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + [
+        dev("x1", "Xan", used: 1, last: nil),
+        dev("x2", "Xan", used: 1, last: nil, enabled: false),
+        dev("y1", "Yan", used: 1, last: nil),
+        dev("z1", "Zed", used: 1, last: nil),
+    ].joined(separator: ",") + "]}")
+    let targets = LogoutPlan.fallbackTargets(devices: r.devices ?? [], codes: ["CODE-Xan"])
+    check(targets.map(\.profileId) == ["x1"], "fallback signs out only the enabled devices of that invite")
+    check(LogoutPlan.fallbackTargets(devices: r.devices ?? [], codes: ["CODE-Xan", "CODE-Yan"]).map(\.profileId).sorted() == ["x1", "y1"],
+          "a user with several invites: all of them")
+    check(LogoutPlan.fallbackTargets(devices: r.devices ?? [], codes: ["CODE-Nobody"]).isEmpty, "unknown invite -> nothing to do")
+} catch { check(false, "fallback targets decoding threw: \(error)") }
+check(LogoutPlan.deviceTitle("Alice iPhone") == "Log out Alice iPhone?" && LogoutPlan.deviceMessage == "It will need the invite code to reconnect.",
+      "device confirmation text")
+check(LogoutPlan.allTitle(count: 3, label: "Alice") == "Log out all 3 devices of Alice?" && LogoutPlan.allTitle(count: 1, label: "Ben") == "Log out 1 device of Ben?",
+      "log out all confirmation text")
+check(SignedOut.notice == "Signed out. Enter your invite code to reconnect.", "landing notice text")
+
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))
 exit(failures == 0 ? 0 : 1)

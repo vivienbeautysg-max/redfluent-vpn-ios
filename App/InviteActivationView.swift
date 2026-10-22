@@ -61,6 +61,12 @@ struct InviteActivationView: View {
 
     private var activationCard: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            if appState.signedOut {
+                Label(SignedOut.notice, systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(Theme.Font.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Theme.Color.textPrimary)
+            }
             Text("Enter your invite code")
                 .font(Theme.Font.titleLarge)
                 .foregroundStyle(Theme.Color.textPrimary)

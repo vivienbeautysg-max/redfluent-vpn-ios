@@ -12,6 +12,13 @@ enum ISODate {
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
         if let d = plain.date(from: s) { return d }
+        // The server's other timestamp style, UTC: "2026-10-22 08:30:00". Before the date-only form, which
+        // would take the date part of this string and drop the time.
+        let sql = DateFormatter()
+        sql.locale = Locale(identifier: "en_US_POSIX")
+        sql.timeZone = TimeZone(secondsFromGMT: 0)
+        sql.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let d = sql.date(from: s) { return d }
         let dateOnly = ISO8601DateFormatter()
         dateOnly.formatOptions = [.withFullDate]
         return dateOnly.date(from: s)
@@ -20,6 +27,10 @@ enum ISODate {
     /// "3 Nov 2026" in `timeZone` (the device's by default).
     static func dayText(_ iso: String?, timeZone: TimeZone = .current) -> String? {
         guard let iso, let date = parse(iso) else { return nil }
+        return dayText(date: date, timeZone: timeZone)
+    }
+
+    static func dayText(date: Date, timeZone: TimeZone = .current) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = timeZone

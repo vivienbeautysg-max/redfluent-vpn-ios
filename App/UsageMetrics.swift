@@ -68,6 +68,11 @@ struct UsageRow: Equatable, Identifiable {
     /// nil when there is no quota (unlimited): no bar is drawn.
     let percent: Double?
     let enabled: Bool
+    /// The invite the device belongs to, its last real traffic (nil = never, or not reported), and whether it is
+    /// connected right now (a signed-out device never counts as online).
+    var inviteCode: String = ""
+    var lastUsedAt: Date? = nil
+    var online: Bool = false
 
     var level: UsageLevel { UsageLevel(percent: percent ?? 0) }
 
@@ -81,8 +86,18 @@ struct UsageRow: Equatable, Identifiable {
 struct UsageGroup: Equatable, Identifiable {
     var id: String { label }
     let label: String
+    /// Everything this user used this period, signed-out devices included.
     let totalGB: Double
     let rows: [UsageRow]
+    /// Distinct invite codes of the user's devices (usually one).
+    var inviteCodes: [String] = []
+    /// Does the backend report last use at all? Without it no "Last used" / "Never" is shown.
+    var lastUsedReported = false
+
+    /// Devices still signed in.
+    var activeDevices: Int { rows.filter(\.enabled).count }
+    var online: Bool { rows.contains { $0.online } }
+    var lastUsedAt: Date? { rows.compactMap(\.lastUsedAt).max() }
 }
 
 enum UsageFormat {
@@ -105,10 +120,12 @@ enum UsageFormat {
 }
 
 enum UsageMetrics {
-    /// Groups devices by invite label (= user). Users by total used GB descending, devices by
-    /// used GB descending. Devices without a `usage` object are left out, so an older backend
-    /// yields no groups and the section stays hidden.
-    static func groups(devices: [OwnerDevice], usage: [String: DeviceUsage]) -> [UsageGroup] {
+    /// Groups devices by invite label (= user). Users by total used GB descending (ties: most recent last use
+    /// first, then label), devices by used GB descending. Devices without a `usage` object are left out, so an
+    /// older backend yields no groups and the section stays hidden.
+    static func groups(devices: [OwnerDevice], usage: [String: DeviceUsage],
+                       lastUsed: [String: DeviceLastUsed] = [:]) -> [UsageGroup] {
+        let reported = !lastUsed.isEmpty
         var byLabel: [String: [UsageRow]] = [:]
         for device in devices {
             // A usage figure that is not a finite number is unusable; a negative one counts as 0.
@@ -130,7 +147,10 @@ enum UsageMetrics {
                 usedGB: used,
                 quotaGB: quota,
                 percent: percent,
-                enabled: device.enabled
+                enabled: device.enabled,
+                inviteCode: device.inviteCode,
+                lastUsedAt: lastUsed[device.profileId]?.date,
+                online: device.enabled && (device.online ?? device.inUse)
             )
             byLabel[label(for: device), default: []].append(row)
         }
@@ -141,12 +161,24 @@ enum UsageMetrics {
                     totalGB: rows.reduce(0) { $0 + $1.usedGB },
                     rows: rows.sorted {
                         $0.usedGB != $1.usedGB ? $0.usedGB > $1.usedGB : $0.displayName < $1.displayName
-                    }
+                    },
+                    inviteCodes: Array(Set(rows.map(\.inviteCode))).sorted(),
+                    lastUsedReported: reported
                 )
             }
-            .sorted {
-                $0.totalGB != $1.totalGB ? $0.totalGB > $1.totalGB : $0.label < $1.label
-            }
+            .sorted(by: ranksBefore)
+    }
+
+    /// Total used desc; a tie goes to the more recent last use (never-used last); then by name.
+    static func ranksBefore(_ a: UsageGroup, _ b: UsageGroup) -> Bool {
+        if a.totalGB != b.totalGB { return a.totalGB > b.totalGB }
+        switch (a.lastUsedAt, b.lastUsedAt) {
+        case let (x?, y?) where x != y: return x > y
+        case (_?, nil):                 return true
+        case (nil, _?):                 return false
+        default:                        break
+        }
+        return a.label < b.label
     }
 
     private static func label(for device: OwnerDevice) -> String {

@@ -20,8 +20,13 @@ import Foundation
 ///   -RFVOpenEditInvite <序号>     Owner Admin 里直接打开第 N 个邀请的编辑页（1 起）
 ///   -RFVOpenCreateInvite          直接打开 Create Invite
 ///   -RFVHideUsage                 Owner Admin 演示不带用量
+///   -RFVScreenshotMode member-signedout  被服务器登出的设备（停在激活页，带 "Signed out. ..." 提示）
+///   -RFVExpandUser <label>        Owner Admin 里展开某个用户（Alice / Ben ...）
+///   -RFVExpandInvites             Owner Admin 里展开 Invites 区（默认折叠）
+///   -RFVConfirmLogoutDevice <设备名>  直接弹出该设备的 Log out 确认框
+///   -RFVConfirmLogoutAll <label>      直接弹出该用户的 Log out all 确认框
 enum ScreenshotMode {
-    enum Variant { case member, memberSingapore, memberExpired, memberExpiring, owner }
+    enum Variant { case member, memberSingapore, memberExpired, memberExpiring, memberSignedOut, owner }
 
     static var isOn: Bool {
         ProcessInfo.processInfo.arguments.contains("-RFVScreenshotMode")
@@ -36,9 +41,24 @@ enum ScreenshotMode {
         case "member-sg":      return .memberSingapore
         case "member-expired": return .memberExpired
         case "member-soon":    return .memberExpiring
+        case "member-signedout": return .memberSignedOut
         default:               return .member
         }
     }
+
+    /// member-signedout：不激活，直接停在激活页并带登出提示。
+    static var startsSignedOut: Bool { variant == .memberSignedOut }
+
+    private static func value(after flag: String) -> String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+
+    static var expandUser: String? { value(after: "-RFVExpandUser") }
+    static var confirmLogoutDevice: String? { value(after: "-RFVConfirmLogoutDevice") }
+    static var confirmLogoutAll: String? { value(after: "-RFVConfirmLogoutAll") }
+    static var expandsInvites: Bool { ProcessInfo.processInfo.arguments.contains("-RFVExpandInvites") }
 
     /// 传 -RFVOpenEditInvite 3 时，Owner Admin 一出来就打开第 3 个邀请的编辑页。
     static var editInviteIndex: Int? {
@@ -111,7 +131,7 @@ enum ScreenshotMode {
                     monthlyQuotaGB: 1000, enabled: true, expiresAt: nil, createdAt: "2026-05-09 08:00:00"),
         OwnerInvite(code: "RF-DEMO-0002", label: "Alice", maxDevices: 3, activeDevices: 2,
                     monthlyQuotaGB: 200, enabled: true, expiresAt: nil, createdAt: "2026-06-01 08:00:00"),
-        OwnerInvite(code: "RF-DEMO-0003", label: "Ben", maxDevices: 3, activeDevices: 2,
+        OwnerInvite(code: "RF-DEMO-0003", label: "Ben", maxDevices: 3, activeDevices: 1,
                     monthlyQuotaGB: 200, enabled: true, expiresAt: nil, createdAt: "2026-06-12 08:00:00"),
         OwnerInvite(code: "RF-DEMO-0004", label: "Clara", maxDevices: 2, activeDevices: 1,
                     monthlyQuotaGB: 200, enabled: true, expiresAt: nil, createdAt: "2026-07-03 08:00:00"),
@@ -136,7 +156,8 @@ enum ScreenshotMode {
     ]
 
     private static func device(_ n: Int, invite: Int, label: String, name: String,
-                               model: String, app: String, online: Bool = false) -> OwnerDevice {
+                               model: String, app: String, online: Bool = false,
+                               enabled: Bool = true) -> OwnerDevice {
         OwnerDevice(
             profileId: "profile_demo\(String(format: "%08d", n))",
             inviteCode: "RF-DEMO-000\(invite)",
@@ -145,7 +166,7 @@ enum ScreenshotMode {
             deviceName: model,
             appVersion: app,
             ownerLabel: label,
-            enabled: true,
+            enabled: enabled,
             connected: online,
             inUse: online,
             online: online,
@@ -157,20 +178,40 @@ enum ScreenshotMode {
             lastTotalUp: nil,
             lastTotalDown: nil,
             createdAt: "2026-06-01 08:00:00",
-            revokedAt: nil
+            revokedAt: enabled ? nil : "2026-10-12 08:00:00"
         )
     }
 
-    /// 4 个用户 / 7 台设备，用量从 11% 到 94%，其中一台超过 90%，一台没有配额。
+    /// 5 个用户 / 8 台设备：Alice 在线；Ben 的 iPad 已被登出；Dana 从没用过；Max 是 owner 自己的邀请。
+    /// 用量从 0 到 94%，其中一台超过 90%，一台没有配额。
     static let ownerDevices: [OwnerDevice] = [
-        device(1, invite: 1, label: "Max", name: "Max iPhone", model: "iPhone 17 Pro Max", app: "1.1 (41)", online: true),
+        device(1, invite: 1, label: "Max", name: "Max iPhone", model: "iPhone 17 Pro Max", app: "1.1 (41)"),
         device(2, invite: 1, label: "Max", name: "Max Desktop", model: "DESKTOP-DEMO", app: "0.1.0"),
         device(3, invite: 2, label: "Alice", name: "Alice iPhone", model: "iPhone 15", app: "1.0 (39)", online: true),
         device(4, invite: 2, label: "Alice", name: "Alice iPad", model: "iPad Air", app: "1.0 (34)"),
         device(5, invite: 3, label: "Ben", name: "Ben iPhone", model: "iPhone 16", app: "1.1 (41)"),
-        device(6, invite: 3, label: "Ben", name: "Ben iPad", model: "iPad mini", app: "1.1 (41)"),
+        device(6, invite: 3, label: "Ben", name: "Ben iPad", model: "iPad mini", app: "1.1 (41)", enabled: false),
         device(7, invite: 4, label: "Clara", name: "Clara iPhone", model: "iPhone 14", app: "1.0 (39)"),
+        device(8, invite: 6, label: "Dana", name: "Dana iPhone", model: "iPhone 13", app: "1.1 (41)"),
     ]
+
+    /// 各设备最近一次真实流量，相对于现在，这样截图里永远是「2h ago」这类说法。Dana 的是 null = Never。
+    static func ownerLastUsed(now: Date = Date()) -> [String: DeviceLastUsed] {
+        let formatter = ISO8601DateFormatter()
+        func ago(_ seconds: TimeInterval) -> DeviceLastUsed {
+            DeviceLastUsed(iso: formatter.string(from: now.addingTimeInterval(-seconds)))
+        }
+        return [
+            "profile_demo00000001": ago(3 * 3_600),
+            "profile_demo00000002": ago(26 * 3_600),
+            "profile_demo00000003": ago(20),
+            "profile_demo00000004": ago(2 * 86_400),
+            "profile_demo00000005": ago(2 * 3_600),
+            "profile_demo00000006": ago(9 * 86_400),
+            "profile_demo00000007": ago(35 * 60),
+            "profile_demo00000008": DeviceLastUsed(iso: nil),
+        ]
+    }
 
     private static func usage(_ used: Double, _ quota: Double?) -> DeviceUsage {
         DeviceUsage(
@@ -190,6 +231,7 @@ enum ScreenshotMode {
         "profile_demo00000005": usage(142.3, 200),
         "profile_demo00000006": usage(22.7, 200),
         "profile_demo00000007": usage(96.0, 200),
+        "profile_demo00000008": usage(0, 200),
     ]
 
     static let ownerPeriod = UsagePeriod(start: "2026-10-01T00:00:00.000Z", end: "2026-11-01T00:00:00.000Z")

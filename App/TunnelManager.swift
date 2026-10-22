@@ -156,6 +156,15 @@ final class TunnelManager: ObservableObject {
         serverStop = nil
     }
 
+    /// The server signed this device out: stop the tunnel, turn on-demand off and drop the saved device token, so
+    /// nothing reconnects (a start without the token could otherwise fall back to the bundled Tokyo config).
+    func stopForSignOut() async {
+        attempts.cancel()
+        // Never configured: nothing to stop, and saving a new configuration would raise the VPN permission prompt.
+        guard (try? await loadManager()) != nil else { return }
+        await disconnect()
+    }
+
     /// The tunnel went down without the app asking. If the extension left a reason (the server ended access,
     /// or a region switch failed), keep it for Diagnostics and let the app ask /profile what is going on.
     private func noteExtensionStop() {

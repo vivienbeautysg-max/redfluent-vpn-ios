@@ -120,6 +120,8 @@ struct OwnerDevicesResult {
     /// Current-period usage by profileId.
     let usage: [String: DeviceUsage]
     let period: UsagePeriod?
+    /// lastUsedAt by profileId; empty when the backend does not report it.
+    let lastUsed: [String: DeviceLastUsed]
 }
 
 struct OwnerDevicesResponse: Decodable {
@@ -128,10 +130,29 @@ struct OwnerDevicesResponse: Decodable {
     let devices: [OwnerDevice]?
     let usage: [String: DeviceUsage]
     let period: UsagePeriod?
+    let lastUsed: [String: DeviceLastUsed]
 
     private struct UsageEntry: Decodable {
         let profileId: String
         let usage: DeviceUsage?
+        /// Present (null = never used) only on backends that report lastUsedAt.
+        let lastUsed: DeviceLastUsed?
+
+        private enum CodingKeys: String, CodingKey { case profileId, usage, lastUsedAt }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            profileId = try c.decode(String.self, forKey: .profileId)
+            usage = try? c.decodeIfPresent(DeviceUsage.self, forKey: .usage)
+            lastUsed = Self.lastUsed(in: c)
+        }
+
+        /// null = never used; absent or of the wrong type = the backend does not say.
+        private static func lastUsed(in c: KeyedDecodingContainer<CodingKeys>) -> DeviceLastUsed? {
+            guard c.contains(.lastUsedAt) else { return nil }
+            if (try? c.decodeNil(forKey: .lastUsedAt)) == true { return DeviceLastUsed(iso: nil) }
+            return (try? c.decode(String.self, forKey: .lastUsedAt)).map { DeviceLastUsed(iso: $0) }
+        }
     }
 
     private enum CodingKeys: String, CodingKey { case ok, error, devices, period }
@@ -143,10 +164,13 @@ struct OwnerDevicesResponse: Decodable {
         devices = try c.decodeIfPresent([OwnerDevice].self, forKey: .devices)
         let entries = (try? c.decodeIfPresent(LossyArray<UsageEntry>.self, forKey: .devices))?.elements ?? []
         var byProfile: [String: DeviceUsage] = [:]
+        var lastUsedByProfile: [String: DeviceLastUsed] = [:]
         for entry in entries {
             if let usage = entry.usage { byProfile[entry.profileId] = usage }
+            if let lastUsed = entry.lastUsed { lastUsedByProfile[entry.profileId] = lastUsed }
         }
         usage = byProfile
+        lastUsed = lastUsedByProfile
         period = try? c.decodeIfPresent(UsagePeriod.self, forKey: .period)
     }
 }
@@ -455,7 +479,7 @@ actor APIClient {
         guard env.ok, let devices = env.devices else {
             throw APIError.status(403, env.error ?? "owner devices rejected")
         }
-        return OwnerDevicesResult(devices: devices, usage: env.usage, period: env.period)
+        return OwnerDevicesResult(devices: devices, usage: env.usage, period: env.period, lastUsed: env.lastUsed)
     }
 
     func fetchOwnerActivationEvents(token: String) async throws -> [OwnerActivationEvent] {
@@ -510,6 +534,23 @@ actor APIClient {
             throw APIError.status(403, env.error ?? "revoke device rejected")
         }
         return device
+    }
+
+    /// Signs out every enabled device of an invite (the invite itself stays valid). Returns how many.
+    func logoutOwnerUser(code: String, token: String) async throws -> Int {
+        struct Request: Encodable {
+            let code: String
+        }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+            let signedOut: Lenient<Int>?
+        }
+        let env: Envelope = try await post(path: "/owner/users/logout", body: Request(code: code), token: token)
+        guard env.ok else {
+            throw APIError.status(403, env.error ?? "logout rejected")
+        }
+        return env.signedOut?.value ?? 0
     }
 
     func sendHeartbeat(connected: Bool, activeConnections: Int?, totalUp: Int64?, totalDown: Int64?, token: String) async throws {

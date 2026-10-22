@@ -10,6 +10,8 @@ final class OwnerAdminViewModel: ObservableObject {
     /// Current-period usage by profileId; empty when the backend has no usage data.
     @Published var usage: [String: DeviceUsage] = [:]
     @Published var usagePeriod: UsagePeriod?
+    /// lastUsedAt by profileId; empty when the backend does not report it.
+    @Published var lastUsed: [String: DeviceLastUsed] = [:]
     @Published var activationEvents: [OwnerActivationEvent] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -24,6 +26,7 @@ final class OwnerAdminViewModel: ObservableObject {
             devices = ScreenshotMode.ownerDevices
             usage = ScreenshotMode.hidesUsage ? [:] : ScreenshotMode.ownerUsage
             usagePeriod = ScreenshotMode.ownerPeriod
+            lastUsed = ScreenshotMode.ownerLastUsed()
             return
         }
         #endif
@@ -40,6 +43,7 @@ final class OwnerAdminViewModel: ObservableObject {
             devices = ownerDevices.devices
             usage = ownerDevices.usage
             usagePeriod = ownerDevices.period
+            lastUsed = ownerDevices.lastUsed
             activationEvents = try await activationList
         } catch {
             errorMessage = error.localizedDescription
@@ -124,6 +128,47 @@ final class OwnerAdminViewModel: ObservableObject {
             return false
         }
     }
+
+    func refreshDevices(token: String) async {
+        do {
+            let result = try await api.fetchOwnerDevices(token: token)
+            devices = result.devices
+            usage = result.usage
+            usagePeriod = result.period
+            lastUsed = result.lastUsed
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Signs out every device of a user (all invites carrying that label); the invites stay valid. Uses
+    /// POST /owner/users/logout. A backend that does not have it answers 404, and then each enabled device is
+    /// signed out with the per-device revoke the backend always had. True when everything worked; failures show
+    /// in the error banner.
+    func logOutUser(codes: [String], token: String) async -> Bool {
+        errorMessage = nil
+        var ok = true
+        for code in codes {
+            do {
+                _ = try await api.logoutOwnerUser(code: code, token: token)
+            } catch where LogoutPlan.needsFallback(error) {
+                for device in LogoutPlan.fallbackTargets(devices: devices, codes: [code]) {
+                    do {
+                        _ = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
+                    } catch {
+                        errorMessage = error.localizedDescription
+                        ok = false
+                    }
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                ok = false
+            }
+        }
+        await refreshDevices(token: token)
+        await refreshInvites(token: token)
+        return ok
+    }
 }
 
 struct OwnerAdminView: View {
@@ -133,6 +178,9 @@ struct OwnerAdminView: View {
     @State private var showingCreateInvite = false
     @State private var inviteToEdit: OwnerInvite?
     @State private var deviceToRename: OwnerDevice?
+    @State private var expandedUsers: Set<String> = []
+    @State private var deviceToLogOut: UsageRow?
+    @State private var userToLogOutAll: UsageGroup?
 
     var body: some View {
         NavigationStack {
@@ -156,26 +204,52 @@ struct OwnerAdminView: View {
                 if !usageGroups.isEmpty {
                     Section(usageHeader) {
                         ForEach(usageGroups) { group in
-                            OwnerUsageGroupView(group: group)
+                            OwnerUsageUserView(
+                                group: group,
+                                now: Date(),
+                                canLogOut: !isOwnerGroup(group),
+                                isExpanded: expansion(of: group),
+                                confirmingDevice: $deviceToLogOut,
+                                confirmingAll: $userToLogOutAll,
+                                onLogOutDevice: logOut,
+                                onLogOutAll: logOutAll
+                            )
                         }
                     }
                 }
 
-                Section("Invites") {
-                    if model.invites.isEmpty && !model.isLoading {
-                        Text("No invites yet")
-                            .foregroundStyle(Theme.Color.textSecondary)
-                    }
-                    ForEach(model.invites) { invite in
-                        Button {
-                            inviteToEdit = invite
-                        } label: {
-                            OwnerInviteRow(invite: invite,
-                                           access: model.inviteAccess[invite.code],
-                                           isOwnerInvite: isOwnerInvite(invite))
+                Section {
+                    if appState.ownerInvitesExpanded {
+                        if model.invites.isEmpty && !model.isLoading {
+                            Text("No invites yet")
+                                .foregroundStyle(Theme.Color.textSecondary)
                         }
-                        .buttonStyle(.plain)
+                        ForEach(model.invites) { invite in
+                            Button {
+                                inviteToEdit = invite
+                            } label: {
+                                OwnerInviteRow(invite: invite,
+                                               access: model.inviteAccess[invite.code],
+                                               isOwnerInvite: isOwnerInvite(invite))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                } header: {
+                    Button {
+                        withAnimation { appState.ownerInvitesExpanded.toggle() }
+                    } label: {
+                        HStack {
+                            Text("Invites \u{00B7} \(model.invites.count)")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .rotationEffect(.degrees(appState.ownerInvitesExpanded ? 90 : 0))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .textCase(nil)
                 }
 
                 Section("Activation Events") {
@@ -263,6 +337,17 @@ struct OwnerAdminView: View {
                 if let n = ScreenshotMode.editInviteIndex, model.invites.indices.contains(n - 1) {
                     inviteToEdit = model.invites[n - 1]
                 }
+                if let label = ScreenshotMode.expandUser, let group = usageGroups.first(where: { $0.label == label }) {
+                    expandedUsers.insert(group.id)
+                }
+                if ScreenshotMode.expandsInvites { appState.ownerInvitesExpanded = true }
+                if let name = ScreenshotMode.confirmLogoutDevice,
+                   let row = usageGroups.flatMap(\.rows).first(where: { $0.displayName == name }) {
+                    deviceToLogOut = row
+                }
+                if let label = ScreenshotMode.confirmLogoutAll, let group = usageGroups.first(where: { $0.label == label }) {
+                    userToLogOutAll = group
+                }
                 #endif
             }
         }
@@ -274,7 +359,36 @@ struct OwnerAdminView: View {
     }
 
     private func isOwnerInvite(_ invite: OwnerInvite) -> Bool {
-        invite.code == ownerInviteCode || invite.code == "RF-OWNER-2026"
+        isOwnerInviteCode(invite.code)
+    }
+
+    private func isOwnerInviteCode(_ code: String) -> Bool {
+        code == ownerInviteCode || code == "RF-OWNER-2026"
+    }
+
+    /// The owner's own devices are never logged out.
+    private func isOwnerGroup(_ group: UsageGroup) -> Bool {
+        group.inviteCodes.contains(where: isOwnerInviteCode)
+    }
+
+    private func expansion(of group: UsageGroup) -> Binding<Bool> {
+        Binding(
+            get: { expandedUsers.contains(group.id) },
+            set: { open in
+                if open { expandedUsers.insert(group.id) } else { expandedUsers.remove(group.id) }
+            }
+        )
+    }
+
+    private func logOut(_ row: UsageRow) {
+        guard let token = appState.currentProfile?.token,
+              let device = model.devices.first(where: { $0.profileId == row.id }) else { return }
+        Task { _ = await model.revokeDevice(device, token: token) }
+    }
+
+    private func logOutAll(_ group: UsageGroup) {
+        guard let token = appState.currentProfile?.token else { return }
+        Task { _ = await model.logOutUser(codes: group.inviteCodes, token: token) }
     }
 
     private func isReviewInvite(_ invite: OwnerInvite) -> Bool {
@@ -282,7 +396,7 @@ struct OwnerAdminView: View {
     }
 
     private var usageGroups: [UsageGroup] {
-        UsageMetrics.groups(devices: model.devices, usage: model.usage)
+        UsageMetrics.groups(devices: model.devices, usage: model.usage, lastUsed: model.lastUsed)
     }
 
     private var usageHeader: String {
@@ -486,11 +600,63 @@ private struct OwnerDeviceRow: View {
     }
 }
 
-private struct OwnerUsageGroupView: View {
+/// One user of the Usage list: label, total used, last use. Tapping it opens the device list.
+private struct OwnerUsageUserView: View {
     let group: UsageGroup
+    let now: Date
+    /// False for the owner's own invite: its devices are never logged out.
+    let canLogOut: Bool
+    @Binding var isExpanded: Bool
+    /// The device / user whose Log out confirmation is open (the dialogs hang off the buttons that asked).
+    @Binding var confirmingDevice: UsageRow?
+    @Binding var confirmingAll: UsageGroup?
+    let onLogOutDevice: (UsageRow) -> Void
+    let onLogOutAll: (UsageGroup) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            ForEach(group.rows) { row in
+                OwnerUsageDeviceView(
+                    row: row,
+                    reported: group.lastUsedReported,
+                    now: now,
+                    canLogOut: canLogOut && row.enabled,
+                    isConfirming: Binding(
+                        get: { confirmingDevice?.id == row.id },
+                        set: { if !$0, confirmingDevice?.id == row.id { confirmingDevice = nil } }
+                    ),
+                    onAskLogOut: { confirmingDevice = row },
+                    onLogOut: { onLogOutDevice(row) }
+                )
+            }
+            if canLogOut, group.activeDevices > 0 {
+                Button(role: .destructive) {
+                    confirmingAll = group
+                } label: {
+                    Label("Log out all devices", systemImage: "rectangle.portrait.and.arrow.right")
+                        .foregroundStyle(Theme.Color.danger)
+                }
+                .confirmationDialog(
+                    LogoutPlan.allTitle(count: group.activeDevices, label: group.label),
+                    isPresented: Binding(
+                        get: { confirmingAll?.id == group.id },
+                        set: { if !$0, confirmingAll?.id == group.id { confirmingAll = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("Log out", role: .destructive) { onLogOutAll(group) }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(LogoutPlan.allMessage)
+                }
+            }
+        } label: {
+            header
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(group.label)
                     .font(Theme.Font.bodyLarge)
@@ -504,20 +670,43 @@ private struct OwnerUsageGroupView: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.Color.textPrimary)
             }
-            ForEach(group.rows) { row in
-                OwnerUsageDeviceView(row: row)
+            HStack(spacing: 6) {
+                if group.online {
+                    Circle().fill(Theme.Color.success).frame(width: 8, height: 8)
+                }
+                statusText
+                    .font(Theme.Font.caption)
             }
         }
         .padding(.vertical, Theme.Spacing.xs)
+    }
+
+    /// "Online · 2 devices" / "Last used 2h ago · 1 device" / "Never · 1 device".
+    private var statusText: Text {
+        let activity = ActivityText.text(online: group.online, lastUsedAt: group.lastUsedAt,
+                                         reported: group.lastUsedReported, now: now)
+        let devices = Text(group.devicesText).foregroundStyle(Theme.Color.textSecondary)
+        guard let activity else { return devices }
+        let first = Text(activity).foregroundStyle(group.online ? Theme.Color.success : Theme.Color.textSecondary)
+        return first + Text(" \u{00B7} ").foregroundStyle(Theme.Color.textSecondary) + devices
     }
 }
 
 private struct OwnerUsageDeviceView: View {
     let row: UsageRow
+    let reported: Bool
+    let now: Date
+    let canLogOut: Bool
+    @Binding var isConfirming: Bool
+    let onAskLogOut: () -> Void
+    let onLogOut: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if row.online {
+                    Circle().fill(Theme.Color.success).frame(width: 8, height: 8)
+                }
                 Text(row.displayName)
                     .font(Theme.Font.body)
                     .foregroundStyle(Theme.Color.textPrimary)
@@ -544,9 +733,37 @@ private struct OwnerUsageDeviceView: View {
                         .frame(width: 48, alignment: .trailing)
                 }
             }
+            HStack {
+                if let activity = ActivityText.text(online: row.online, lastUsedAt: row.lastUsedAt,
+                                                    reported: reported, now: now) {
+                    Text(activity)
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(row.online ? Theme.Color.success : Theme.Color.textSecondary)
+                }
+                Spacer(minLength: Theme.Spacing.sm)
+                if canLogOut {
+                    Button("Log out", action: onAskLogOut)
+                        .font(Theme.Font.caption)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Theme.Color.danger)
+                        .confirmationDialog(
+                            LogoutPlan.deviceTitle(row.displayName),
+                            isPresented: $isConfirming,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Log out", role: .destructive, action: onLogOut)
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text(LogoutPlan.deviceMessage)
+                        }
+                } else if !row.enabled {
+                    Text("Signed out")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                }
+            }
         }
         .opacity(row.enabled ? 1 : 0.55)
-        .accessibilityElement(children: .combine)
     }
 }
 

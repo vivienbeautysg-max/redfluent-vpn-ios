@@ -14,6 +14,7 @@ swiftc -o "$OUT" \
   App/Regions.swift \
   App/StartAttempt.swift \
   App/AccessExpiry.swift \
+  App/OwnerUsers.swift \
   App/UsageMetrics.swift \
   App/APIClient.swift \
   Tunnel/RegionFollow.swift \
