@@ -5,6 +5,9 @@ import UIKit
 final class OwnerAdminViewModel: ObservableObject {
     @Published var invites: [OwnerInvite] = []
     @Published var devices: [OwnerDevice] = []
+    /// Current-period usage by profileId; empty when the backend has no usage data.
+    @Published var usage: [String: DeviceUsage] = [:]
+    @Published var usagePeriod: UsagePeriod?
     @Published var activationEvents: [OwnerActivationEvent] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -12,6 +15,15 @@ final class OwnerAdminViewModel: ObservableObject {
     private let api = APIClient.shared
 
     func refresh(token: String) async {
+        #if DEBUG
+        if ScreenshotMode.isOn {
+            invites = ScreenshotMode.ownerInvites
+            devices = ScreenshotMode.ownerDevices
+            usage = ScreenshotMode.ownerUsage
+            usagePeriod = ScreenshotMode.ownerPeriod
+            return
+        }
+        #endif
         isLoading = true
         errorMessage = nil
         do {
@@ -19,7 +31,10 @@ final class OwnerAdminViewModel: ObservableObject {
             async let deviceList = api.fetchOwnerDevices(token: token)
             async let activationList = api.fetchOwnerActivationEvents(token: token)
             invites = try await inviteList
-            devices = try await deviceList
+            let ownerDevices = try await deviceList
+            devices = ownerDevices.devices
+            usage = ownerDevices.usage
+            usagePeriod = ownerDevices.period
             activationEvents = try await activationList
         } catch {
             errorMessage = error.localizedDescription
@@ -133,6 +148,14 @@ struct OwnerAdminView: View {
                     .foregroundStyle(Theme.Color.brandPrimary)
                 }
 
+                if !usageGroups.isEmpty {
+                    Section(usageHeader) {
+                        ForEach(usageGroups) { group in
+                            OwnerUsageGroupView(group: group)
+                        }
+                    }
+                }
+
                 Section("Invites") {
                     if model.invites.isEmpty && !model.isLoading {
                         Text("No invites yet")
@@ -226,6 +249,15 @@ struct OwnerAdminView: View {
             }
             .task { await refresh() }
         }
+    }
+
+    private var usageGroups: [UsageGroup] {
+        UsageMetrics.groups(devices: model.devices, usage: model.usage)
+    }
+
+    private var usageHeader: String {
+        if let since = UsageMetrics.periodText(model.usagePeriod) { return "Usage \u{00B7} \(since)" }
+        return "Usage"
     }
 
     private var devicesHeader: String {
@@ -404,6 +436,98 @@ private struct OwnerDeviceRow: View {
         if let last = device.lastHeartbeatAt { return "Seen \(displayServerTime(last))" }
         if let last = device.lastSeenAt { return "Activated \(displayServerTime(last))" }
         return "Inactive"
+    }
+}
+
+private struct OwnerUsageGroupView: View {
+    let group: UsageGroup
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(group.label)
+                    .font(Theme.Font.bodyLarge)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: Theme.Spacing.sm)
+                Text(UsageFormat.total(group.totalGB))
+                    .font(Theme.Font.body)
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Color.textPrimary)
+            }
+            ForEach(group.rows) { row in
+                OwnerUsageDeviceView(row: row)
+            }
+        }
+        .padding(.vertical, Theme.Spacing.xs)
+    }
+}
+
+private struct OwnerUsageDeviceView: View {
+    let row: UsageRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(row.displayName)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: Theme.Spacing.sm)
+                Text(row.amountText)
+                    .font(Theme.Font.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+            if let detail = row.detail {
+                Text(detail)
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .lineLimit(1)
+            }
+            if let fraction = row.fraction, let percentText = row.percentText {
+                HStack(spacing: Theme.Spacing.sm) {
+                    UsageBar(fraction: fraction, color: row.level.color)
+                    Text(percentText)
+                        .font(Theme.Font.micro)
+                        .monospacedDigit()
+                        .foregroundStyle(row.level == .critical ? Theme.Color.danger : Theme.Color.textSecondary)
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+        }
+        .opacity(row.enabled ? 1 : 0.55)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Capsule bar drawn directly so track and fill read the same in light and dark mode.
+private struct UsageBar: View {
+    let fraction: Double
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(.tertiarySystemFill))
+                Capsule()
+                    .fill(color)
+                    .frame(width: fraction > 0 ? max(geo.size.width * fraction, 6) : 0)
+            }
+        }
+        .frame(height: 8)
+    }
+}
+
+private extension UsageLevel {
+    var color: Color {
+        switch self {
+        case .ok:       return Theme.Color.success
+        case .warning:  return Theme.Color.warning
+        case .critical: return Theme.Color.danger
+        }
     }
 }
 

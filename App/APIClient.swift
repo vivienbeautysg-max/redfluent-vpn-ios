@@ -17,6 +17,47 @@ struct ProfileStatus: Codable, Equatable {
     let serverRegion: String
     let routingMode: String
     let monthlyQuotaGB: Int?
+    /// Only sent by multi-region backends; an older server means "not owner, Tokyo only".
+    var isOwner: Bool = false
+    var regions: [VPNRegion] = [.tokyo]
+}
+
+/// Wire format of GET /profile. `isOwner` and `regions` come from multi-region backends only;
+/// a missing or malformed `regions` must never make the whole response fail (that would also
+/// hide the `enabled` revoke flag).
+struct ProfileResponse: Decodable {
+    let ok: Bool
+    let error: String?
+    let enabled: Bool?
+    let profileId: String?
+    let ownerLabel: String?
+    let serverRegion: String?
+    let routingMode: String?
+    let monthlyQuotaGB: Int?
+    let isOwner: Bool?
+    let regions: LossyArray<VPNRegion>?
+
+    func status() throws -> ProfileStatus {
+        guard ok,
+              let enabled,
+              let profileId,
+              let ownerLabel,
+              let region = serverRegion,
+              let routing = routingMode
+        else {
+            throw APIError.status(403, error ?? "profile rejected")
+        }
+        return ProfileStatus(
+            enabled: enabled,
+            profileId: profileId,
+            ownerLabel: ownerLabel,
+            serverRegion: region,
+            routingMode: routing,
+            monthlyQuotaGB: monthlyQuotaGB,
+            isOwner: isOwner ?? false,
+            regions: RegionPolicy.offered(from: regions?.elements)
+        )
+    }
 }
 
 struct CreatedInvite: Codable, Equatable {
@@ -62,6 +103,44 @@ struct OwnerDevice: Codable, Equatable, Identifiable {
     let lastTotalDown: Int64?
     let createdAt: String
     let revokedAt: String?
+}
+
+/// Result of GET /owner/devices. `usage` / `period` are empty / nil on a backend that predates
+/// usage reporting, and a malformed value there can never fail the device list.
+struct OwnerDevicesResult {
+    let devices: [OwnerDevice]
+    /// Current-period usage by profileId.
+    let usage: [String: DeviceUsage]
+    let period: UsagePeriod?
+}
+
+struct OwnerDevicesResponse: Decodable {
+    let ok: Bool
+    let error: String?
+    let devices: [OwnerDevice]?
+    let usage: [String: DeviceUsage]
+    let period: UsagePeriod?
+
+    private struct UsageEntry: Decodable {
+        let profileId: String
+        let usage: DeviceUsage?
+    }
+
+    private enum CodingKeys: String, CodingKey { case ok, error, devices, period }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decode(Bool.self, forKey: .ok)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        devices = try c.decodeIfPresent([OwnerDevice].self, forKey: .devices)
+        let entries = (try? c.decodeIfPresent(LossyArray<UsageEntry>.self, forKey: .devices))?.elements ?? []
+        var byProfile: [String: DeviceUsage] = [:]
+        for entry in entries {
+            if let usage = entry.usage { byProfile[entry.profileId] = usage }
+        }
+        usage = byProfile
+        period = try? c.decodeIfPresent(UsagePeriod.self, forKey: .period)
+    }
 }
 
 struct OwnerActivationEvent: Codable, Equatable, Identifiable {
@@ -263,34 +342,8 @@ actor APIClient {
     }
 
     func fetchProfile(token: String) async throws -> ProfileStatus {
-        struct Envelope: Decodable {
-            let ok: Bool
-            let error: String?
-            let enabled: Bool?
-            let profileId: String?
-            let ownerLabel: String?
-            let serverRegion: String?
-            let routingMode: String?
-            let monthlyQuotaGB: Int?
-        }
-        let env: Envelope = try await get(path: "/profile", token: token)
-        guard env.ok,
-              let enabled = env.enabled,
-              let profileId = env.profileId,
-              let ownerLabel = env.ownerLabel,
-              let region = env.serverRegion,
-              let routing = env.routingMode
-        else {
-            throw APIError.status(403, env.error ?? "profile rejected")
-        }
-        return ProfileStatus(
-            enabled: enabled,
-            profileId: profileId,
-            ownerLabel: ownerLabel,
-            serverRegion: region,
-            routingMode: routing,
-            monthlyQuotaGB: env.monthlyQuotaGB
-        )
+        let env: ProfileResponse = try await get(path: "/profile", token: token)
+        return try env.status()
     }
 
     func createInvite(code: String, label: String?, maxDevices: Int, monthlyQuotaGB: Int, token: String) async throws -> CreatedInvite {
@@ -374,17 +427,12 @@ actor APIClient {
         return env.revokedDevices ?? 0
     }
 
-    func fetchOwnerDevices(token: String) async throws -> [OwnerDevice] {
-        struct Envelope: Decodable {
-            let ok: Bool
-            let error: String?
-            let devices: [OwnerDevice]?
-        }
-        let env: Envelope = try await get(path: "/owner/devices", token: token)
+    func fetchOwnerDevices(token: String) async throws -> OwnerDevicesResult {
+        let env: OwnerDevicesResponse = try await get(path: "/owner/devices", token: token)
         guard env.ok, let devices = env.devices else {
             throw APIError.status(403, env.error ?? "owner devices rejected")
         }
-        return devices
+        return OwnerDevicesResult(devices: devices, usage: env.usage, period: env.period)
     }
 
     func fetchOwnerActivationEvents(token: String) async throws -> [OwnerActivationEvent] {

@@ -5,6 +5,8 @@ import Foundation
 enum SharedContainer {
     static let appGroupID = "group.com.redfluent.vpn"
     static let statsFileName = "stats.json"
+    /// Must stay identical to RegionStore.activeKey in the app target.
+    static let activeRegionKey = "rfv.region.active"
 
     static var containerURL: URL? {
         FileManager.default
@@ -46,5 +48,14 @@ enum SharedContainer {
             return nil
         }
         return try? decoder.decode(StatsSnapshot.self, from: data)
+    }
+
+    /// Record which region this run of the tunnel really started with, for the app to show.
+    static func writeActiveRegion(id: String, name: String) {
+        UserDefaults(suiteName: appGroupID)?.set(["id": id, "name": name], forKey: activeRegionKey)
+    }
+
+    static func clearActiveRegion() {
+        UserDefaults(suiteName: appGroupID)?.removeObject(forKey: activeRegionKey)
     }
 }

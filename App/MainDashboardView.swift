@@ -84,6 +84,9 @@ struct MainDashboardView: View {
                 Text("Your invite remains valid. You can re-activate by entering the same invite code.")
             }
             .task {
+                #if DEBUG
+                if ScreenshotMode.opensOwnerAdmin { showingOwnerAdmin = true }
+                #endif
                 await tunnelManager.loadStatus()
                 await appState.refresh()
                 statsStore.refresh()
@@ -107,6 +110,12 @@ struct MainDashboardView: View {
                     statsStore.stopAutoRefresh()
                     stopHeartbeat()
                 }
+            }
+            .onChange(of: appState.selectedRegionID) { _, _ in
+                // Connected: reconnect so the new region takes effect. Disconnected: the choice is
+                // already saved and is used at the next connect.
+                guard tunnelManager.status.isConnected else { return }
+                Task { await tunnelManager.restart() }
             }
         }
     }
@@ -134,14 +143,56 @@ struct MainDashboardView: View {
 
     private var serverCard: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            row(icon: "globe.asia.australia.fill", label: "Server",
-                value: appState.currentProfile?.serverRegion ?? "Tokyo")
+            if appState.regions.count > 1 {
+                regionRow
+            } else {
+                row(icon: "globe.asia.australia.fill", label: "Server",
+                    value: appState.serverDisplayName(connected: tunnelManager.status == .connected) ?? "Tokyo")
+            }
             Divider()
             row(icon: "shield.lefthalf.filled", label: "Mode", value: "Secure Tunnel")
             Divider()
             row(icon: "antenna.radiowaves.left.and.right", label: "Provider", value: "RedFluent")
         }
         .card()
+    }
+
+    // Owner-only: shown when the server offers more than one region.
+    private var regionRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack {
+                Image(systemName: "globe.asia.australia.fill")
+                    .foregroundStyle(Theme.Color.brandPrimary)
+                    .frame(width: 22)
+                Text("Server").foregroundStyle(Theme.Color.textSecondary)
+                Spacer()
+                Picker("Server", selection: regionBinding) {
+                    ForEach(appState.regions) { region in
+                        Text(region.name).tag(region.id)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 220)
+                .disabled(tunnelManager.status == .connecting || tunnelManager.status == .disconnecting)
+            }
+            .font(Theme.Font.body)
+            if let inUse = regionInUse {
+                Text("In use: \(inUse)")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Color.textSecondary)
+            }
+        }
+    }
+
+    private var regionBinding: Binding<String> {
+        Binding(get: { appState.selectedRegionID }, set: { appState.selectRegion($0) })
+    }
+
+    /// The region the tunnel is really using, when that is not the selected one.
+    private var regionInUse: String? {
+        guard tunnelManager.status == .connected,
+              let active = RegionStore.active(), active.id != appState.selectedRegionID else { return nil }
+        return active.name
     }
 
     // 只在还没绑定时出现，绑好之后这张卡就永远消失 —— 不留常驻入口。

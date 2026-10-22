@@ -28,6 +28,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called")
+        SharedContainer.clearActiveRegion()
 
         #if HAS_LIBBOX
         try await startWithLibbox()
@@ -38,6 +39,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
         logger.info("stopTunnel reason=\(reason.rawValue)")
+        SharedContainer.clearActiveRegion()
         #if HAS_LIBBOX
         if let poller = statsPoller {
             await poller.stop()
@@ -137,39 +139,81 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // Prefer a per-device config from the backend (carries this device's own
         // uuid, so revoking it server-side actually cuts the tunnel). Fall back
         // to the bundled shared config on ANY failure so the tunnel still comes up.
-        if let perDevice = await fetchPerDeviceConfigData() {
+        // Exception: a non-default region never falls back. The bundled config is Tokyo,
+        // and connecting there while the app says Singapore would be a lie.
+        let region = requestedRegion
+        let fetched = await fetchPerDeviceConfigData(region: region)
+        if let perDevice = fetched.data {
+            SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
             return try injectClashAPI(into: perDevice)
+        }
+        guard RuntimeConfigRequest.isDefault(region: region) else {
+            throw NSError(domain: "rfv.tunnel", code: 210,
+                          userInfo: [NSLocalizedDescriptionKey: RuntimeConfigRequest.failureMessage(
+                              region: region, detail: fetched.failure ?? "no response")])
         }
         guard let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
               let data = try? Data(contentsOf: url) else {
             throw NSError(domain: "rfv.tunnel", code: 200,
                           userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
         }
+        SharedContainer.writeActiveRegion(id: region, name: "Tokyo")
         return try injectClashAPI(into: data)
     }
 
-    /// Fetch this device's sing-box config from the backend, using the token the
-    /// app passed via providerConfiguration. Returns nil on any failure so the
-    /// caller falls back to the bundled config.
-    private func fetchPerDeviceConfigData() async -> Data? {
+    /// The region the app asked for in providerConfiguration; missing means the default (Tokyo).
+    private var requestedRegion: String {
+        let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        guard let region = cfg?["region"] as? String, !region.isEmpty else {
+            return RuntimeConfigRequest.defaultRegion
+        }
+        return region
+    }
+
+    private struct RuntimeConfigFetch {
+        var data: Data?
+        var serverRegion: String?
+        var failure: String?
+    }
+
+    /// Fetch this device's sing-box config for `region` from the backend, using the token the
+    /// app passed via providerConfiguration. On any failure `data` is nil and `failure` says why,
+    /// so the caller can fall back to the bundled config (default region only).
+    private func fetchPerDeviceConfigData(region: String) async -> RuntimeConfigFetch {
         let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
         guard let token = cfg?["token"] as? String,
               let base = cfg?["apiBase"] as? String,
-              let url = URL(string: base + "/device/runtime-config") else { return nil }
+              let url = RuntimeConfigRequest.url(base: base, region: region) else {
+            return RuntimeConfigFetch(failure: "device not activated")
+        }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = 8
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                  let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let http = resp as? HTTPURLResponse else {
+                return RuntimeConfigFetch(failure: "no HTTP response")
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let reason = RuntimeConfigRequest.serverReason(from: data)
+                return RuntimeConfigFetch(failure: "HTTP \(http.statusCode)" + (reason.map { ": \($0)" } ?? ""))
+            }
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   obj["ok"] as? Bool == true,
-                  let rc = obj["runtimeConfig"] else { return nil }
+                  let rc = obj["runtimeConfig"] else {
+                return RuntimeConfigFetch(failure: "unexpected response")
+            }
+            // A backend that predates regions ignores ?region= and answers with the Tokyo config.
+            if !RuntimeConfigRequest.isDefault(region: region),
+               !RuntimeConfigRequest.confirms(region: region, in: obj) {
+                return RuntimeConfigFetch(failure: "server did not confirm the region")
+            }
             logger.info("using per-device config from backend")
-            return try JSONSerialization.data(withJSONObject: rc)
+            return RuntimeConfigFetch(data: try JSONSerialization.data(withJSONObject: rc),
+                                      serverRegion: obj["serverRegion"] as? String)
         } catch {
-            logger.warning("per-device config fetch failed; using bundled: \(error.localizedDescription, privacy: .public)")
-            return nil
+            logger.warning("per-device config fetch failed: \(error.localizedDescription, privacy: .public)")
+            return RuntimeConfigFetch(failure: error.localizedDescription)
         }
     }
 

@@ -9,6 +9,7 @@ final class TunnelManager: ObservableObject {
     private let providerBundleIdentifier = "com.redfluent.vpn.tunnel"
     private let tunnelDescription = "RedFluent VPN"
     private var statusObserver: NSObjectProtocol?
+    private var isRestarting = false
 
     init() {
         statusObserver = NotificationCenter.default.addObserver(
@@ -19,7 +20,14 @@ final class TunnelManager: ObservableObject {
             guard let self else { return }
             if let conn = note.object as? NEVPNConnection {
                 Task { @MainActor in
-                    self.status = TunnelStatus(neStatus: conn.status)
+                    let previous = self.status
+                    let next = TunnelStatus(neStatus: conn.status)
+                    self.status = next
+                    // A start attempt that drops straight back to "disconnected" may have been
+                    // refused by the extension (e.g. its region config could not be loaded).
+                    if next == .disconnected, previous == .connecting {
+                        self.reportStartFailure(conn)
+                    }
                 }
             }
         }
@@ -80,6 +88,41 @@ final class TunnelManager: ObservableObject {
         }
     }
 
+    /// Reconnect so a changed region takes effect (the extension reads its config only at start).
+    func restart() async {
+        guard !isRestarting else { return }
+        isRestarting = true
+        defer { isRestarting = false }
+        status = .disconnecting
+        do {
+            // Same order as disconnect(): clear on-demand first so iOS does not bring the old
+            // region back by itself, then stop and wait until the tunnel is really down.
+            let manager = try await loadOrCreateConfiguredManager(onDemand: false)
+            manager.connection.stopVPNTunnel()
+            var waited = 0
+            while waited < 50, manager.connection.status != .disconnected, manager.connection.status != .invalid {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+            }
+        } catch {
+            lastError = error.localizedDescription
+            status = .failed
+            return
+        }
+        await connect()
+    }
+
+    /// Show why a start attempt ended: the extension's own error (not a silent drop to "Disconnected").
+    private func reportStartFailure(_ connection: NEVPNConnection) {
+        connection.fetchLastDisconnectError { [weak self] error in
+            guard let error else { return }
+            Task { @MainActor in
+                self?.lastError = error.localizedDescription
+                self?.status = .failed
+            }
+        }
+    }
+
     /// Read-only load of the existing tunnel manager (no save). Returns nil if
     /// the user has never configured the tunnel yet.
     private func loadManager() async throws -> NETunnelProviderManager? {
@@ -96,8 +139,9 @@ final class TunnelManager: ObservableObject {
 
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
-        proto.serverAddress = "RedFluent Tokyo"
-        var providerConfig: [String: Any] = ["configProfile": "review-safe-profile-v1"]
+        let region = RegionStore.selectedRegion()
+        proto.serverAddress = "RedFluent \(region.name)"
+        var providerConfig: [String: Any] = ["configProfile": "review-safe-profile-v1", "region": region.id]
         // Pass the device token + API base so the tunnel extension can fetch a
         // per-device sing-box config (its own uuid) from the backend. The
         // extension falls back to the bundled config if this is absent or fails.

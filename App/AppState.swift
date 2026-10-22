@@ -13,6 +13,9 @@ final class AppState: ObservableObject {
 
     @Published var activation: ActivationState = .notActivated
     @Published var lastActivationError: String?
+    /// Regions the server offers this device (Tokyo only unless the backend says more) and the chosen one.
+    @Published private(set) var regions: [VPNRegion] = [.tokyo]
+    @Published private(set) var selectedRegionID: String = RegionPolicy.defaultID
 
     private let api = APIClient.shared
 
@@ -20,10 +23,14 @@ final class AppState: ObservableObject {
     @Published var appleLinked: Bool = UserDefaults.standard.bool(forKey: "rfv.appleLinked")
 
     init() {
+        regions = RegionStore.offered()
+        selectedRegionID = RegionPolicy.resolveSelection(stored: RegionStore.selectedID(), offered: regions)
         #if DEBUG
         if ScreenshotMode.isOn {
             activation = .activated(ScreenshotMode.profile)
             appleLinked = true          // 截图里不出现绑定卡片
+            regions = ScreenshotMode.regions
+            selectedRegionID = ScreenshotMode.selectedRegionID
             return
         }
         #endif
@@ -45,6 +52,36 @@ final class AppState: ObservableObject {
         let updated = profile.withToken(newToken)
         try? ProfileStore.save(updated)
         activation = .activated(updated)
+    }
+
+    /// Adopt the region list from /profile. A selection the server no longer offers falls back to Tokyo.
+    func applyOfferedRegions(_ offered: [VPNRegion]) {
+        regions = offered
+        RegionStore.saveOffered(offered)
+        let resolved = RegionPolicy.resolveSelection(stored: selectedRegionID, offered: offered)
+        if resolved != selectedRegionID {
+            selectedRegionID = resolved
+            RegionStore.saveSelected(resolved)
+        }
+    }
+
+    func selectRegion(_ id: String) {
+        guard id != selectedRegionID, regions.contains(where: { $0.id == id }) else { return }
+        selectedRegionID = id
+        RegionStore.saveSelected(id)
+    }
+
+    /// Region name for the Server row: what the tunnel really started with while connected,
+    /// otherwise the selection. A single-region device keeps showing its profile's region.
+    func serverDisplayName(connected: Bool) -> String? {
+        guard regions.count > 1 else { return currentProfile?.serverRegion }
+        if connected, let active = RegionStore.active() { return active.name }
+        return RegionPolicy.name(of: selectedRegionID, in: regions)
+    }
+
+    /// Back to Tokyo only (sign-out / revoked): the next activation may be a different invite.
+    private func resetRegions() {
+        applyOfferedRegions([.tokyo])
     }
 
     /// 把当前邀请码绑到 Apple ID。失败不影响已经能用的 VPN，只是没绑上。
@@ -118,7 +155,10 @@ final class AppState: ObservableObject {
             let status = try await api.fetchProfile(token: profile.token)
             if !status.enabled {
                 ProfileStore.clear()
+                resetRegions()
                 activation = .revoked
+            } else {
+                applyOfferedRegions(status.regions)
             }
         } catch {
             // Network failure during refresh is non-fatal — we keep the cached profile.
@@ -128,6 +168,7 @@ final class AppState: ObservableObject {
 
     func signOut() {
         ProfileStore.clear()
+        resetRegions()
         activation = .notActivated
         lastActivationError = nil
     }

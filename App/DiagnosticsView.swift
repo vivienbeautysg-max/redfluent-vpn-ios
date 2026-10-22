@@ -17,7 +17,8 @@ struct DiagnosticsView: View {
             List {
                 Section("Tunnel") {
                     LabeledContent("Status", value: tunnelManager.status.displayName)
-                    LabeledContent("Server", value: appState.currentProfile?.serverRegion ?? "—")
+                    LabeledContent("Server",
+                                   value: appState.serverDisplayName(connected: tunnelManager.status == .connected) ?? "—")
                     LabeledContent("Mode",   value: "Secure Tunnel")
                 }
 
@@ -89,7 +90,7 @@ struct DiagnosticsView: View {
         return """
         RedFluent VPN diagnostics
         Status:    \(tunnelManager.status.displayName)
-        Server:    \(profile?.serverRegion ?? "—")
+        Server:    \(appState.serverDisplayName(connected: tunnelManager.status == .connected) ?? "—")
         Mode:      Secure Tunnel
         Owner:     \(profile?.ownerLabel ?? "—")
         Profile:   \(profile?.profileId ?? "—")
