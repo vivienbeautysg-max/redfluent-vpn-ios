@@ -21,6 +21,7 @@ struct MainDashboardView: View {
                     TrafficOrbRing(
                         status: tunnelManager.status,
                         snapshot: statsStore.snapshot,
+                        isEnabled: !appState.expiry.expired || tunnelManager.status.isConnected,
                         action: { await tunnelManager.toggle() }
                     )
                     statusLabel
@@ -86,6 +87,7 @@ struct MainDashboardView: View {
             .task {
                 #if DEBUG
                 if ScreenshotMode.opensOwnerAdmin { showingOwnerAdmin = true }
+                if ScreenshotMode.opensCreateInvite { showingCreateInvite = true }
                 #endif
                 await tunnelManager.loadStatus()
                 await appState.refresh()
@@ -101,6 +103,7 @@ struct MainDashboardView: View {
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
+                    Task { await appState.refresh() }
                     statsStore.refresh()
                     Task { await statsStore.ping() }
                     quotaStore.refresh(token: appState.currentProfile?.token)
@@ -128,10 +131,23 @@ struct MainDashboardView: View {
             Text(tunnelManager.status.displayName)
                 .font(Theme.Font.displayMedium)
                 .foregroundStyle(Theme.Color.textPrimary)
-            Text(tunnelManager.status.detail)
-                .font(Theme.Font.body)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .multilineTextAlignment(.center)
+            if let expired = ExpiryDisplay.expiredText(appState.expiry) {
+                Text(expired)
+                    .font(Theme.Font.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Theme.Color.danger)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text(tunnelManager.status.detail)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .multilineTextAlignment(.center)
+                if let left = ExpiryDisplay.daysLeftText(appState.expiry) {
+                    Text(left)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Color.warning)
+                }
+            }
         }
     }
 

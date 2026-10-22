@@ -11,21 +11,28 @@ enum RuntimeConfigRequest {
     private static let idCharacters = CharacterSet(
         charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
+    /// The `region` query value to send, or nil for no parameter. A device whose region the server decides
+    /// (everyone but the owner) never sends one; the default region (Tokyo) sends today's request unchanged.
+    static func regionParameter(region: String, serverDecides: Bool) -> String? {
+        if serverDecides || isDefault(region: region) { return nil }
+        return region
+    }
+
     /// `base` + path, plus `?region=<id>` for a non-default region. Built by string concatenation:
     /// URL.appendingPathComponent would percent-escape the "?" (same trap as APIClient.apiURL).
-    /// The default region sends today's request unchanged.
-    static func url(base: String, region: String) -> URL? {
+    /// `region` nil or the default region sends today's request unchanged.
+    static func url(base: String, region: String?) -> URL? {
         var s = base + "/device/runtime-config"
-        if !isDefault(region: region) {
+        if let region, !isDefault(region: region) {
             guard let id = region.addingPercentEncoding(withAllowedCharacters: idCharacters) else { return nil }
             s += "?region=" + id
         }
         return URL(string: s)
     }
 
-    /// A non-default region must be confirmed by the server. A backend that predates regions
-    /// ignores the query and returns the Tokyo config; accepting that would connect to Tokyo
-    /// while the app says otherwise.
+    /// A non-default region that was asked for explicitly must be confirmed by the server. A backend that
+    /// predates regions ignores the query and returns the Tokyo config; accepting that would connect to
+    /// Tokyo while the app says otherwise.
     static func confirms(region: String, in response: [String: Any]) -> Bool {
         guard let echoed = response["region"] as? String else { return false }
         return echoed.lowercased() == region.lowercased()

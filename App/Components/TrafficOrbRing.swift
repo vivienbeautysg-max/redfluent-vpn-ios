@@ -7,6 +7,8 @@ import SwiftUI
 struct TrafficOrbRing: View {
     let status: TunnelStatus
     let snapshot: StatsSnapshot?
+    /// False while the account is expired and nothing is connected: the orb cannot start a connection.
+    var isEnabled: Bool = true
     let action: () async -> Void
 
     @State private var pulse = false
@@ -44,7 +46,8 @@ struct TrafficOrbRing: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(status.isConnected ? "Disconnect VPN" : "Connect VPN")
-        .disabled(status == .connecting || status == .disconnecting)
+        .disabled(status == .connecting || status == .disconnecting || !isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
         .padding(.top, Theme.Spacing.lg)
         .scaleEffect(status.isConnected ? 1.05 : 1.0)
         .animation(.spring(duration: 0.6), value: status)

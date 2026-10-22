@@ -5,6 +5,8 @@ import NetworkExtension
 final class TunnelManager: ObservableObject {
     @Published var status: TunnelStatus = .disconnected
     @Published var lastError: String?
+    /// The server ended this device's access while connected (expired / revoked). The app root reacts, then acknowledges.
+    @Published private(set) var serverStop: ServerStop?
 
     private let providerBundleIdentifier = "com.redfluent.vpn.tunnel"
     private let tunnelDescription = "RedFluent VPN"
@@ -32,6 +34,8 @@ final class TunnelManager: ObservableObject {
                         // on-demand) and starts iOS triggers itself stay a plain "Disconnected".
                         if let attempt = self.attempts.attemptForDisconnect() {
                             self.reportStartFailure(conn, attempt: attempt)
+                        } else {
+                            self.noteExtensionStop()
                         }
                     default:
                         break
@@ -135,10 +139,32 @@ final class TunnelManager: ObservableObject {
         // Signed out or revoked (the selection is reset then): there is no configuration to keep in step,
         // and a reconnect would start without the device token.
         guard ProfileStore.load() != nil else { return }
+        if RegionStore.isServerDecided() {
+            // The server decides the region and a running tunnel follows it by itself: never restart for
+            // this, and do not touch the saved configuration while a tunnel is up.
+            if !status.isConnected { await syncSavedRegion() }
+            return
+        }
         if status.isConnected {
             await restart()
         } else {
             await syncSavedRegion()
+        }
+    }
+
+    func acknowledgeServerStop() {
+        serverStop = nil
+    }
+
+    /// The tunnel went down without the app asking. If the extension left a reason (the server ended access,
+    /// or a region switch failed), keep it for Diagnostics and let the app ask /profile what is going on.
+    private func noteExtensionStop() {
+        guard let entry = TunnelStartError.readRecent() else { return }
+        lastError = entry.message
+        if let stop = entry.stop {
+            serverStop = stop           // the record stays: it keeps on-demand from restarting until /profile says fine
+        } else {
+            TunnelStartError.clear()    // a plain failure is told once
         }
     }
 
@@ -147,9 +173,12 @@ final class TunnelManager: ObservableObject {
         do {
             // Never configured yet: the first connect() writes it.
             guard let manager = try await loadManager() else { return }
+            let serverDecides = RegionStore.isServerDecided()
             switch manager.connection.status {
             case .connected, .connecting, .reasserting:
-                await restart()   // it is up after all: a save alone would not change the running region
+                // It is up after all. The owner's change needs a restart; where the server decides, the
+                // tunnel follows by itself and a save now would only disturb it.
+                if !serverDecides { await restart() }
                 return
             default:
                 break
@@ -158,9 +187,11 @@ final class TunnelManager: ObservableObject {
             let region = RegionStore.selectedRegion()
             let address = RegionPolicy.serverAddress(for: region)
             let saved = proto.providerConfiguration?["region"] as? String
-            if saved == region.id, proto.serverAddress == address { return }
+            let savedMode = proto.providerConfiguration?["regionMode"] as? String
+            if saved == region.id, savedMode == (serverDecides ? "server" : "explicit"), proto.serverAddress == address { return }
             proto.serverAddress = address
-            proto.providerConfiguration = RegionPolicy.providerConfiguration(proto.providerConfiguration, region: region)
+            proto.providerConfiguration = RegionPolicy.providerConfiguration(
+                proto.providerConfiguration, region: region, serverDecides: serverDecides)
             manager.protocolConfiguration = proto
             try await manager.saveToPreferences()
         } catch {
@@ -230,7 +261,11 @@ final class TunnelManager: ObservableObject {
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
         proto.serverAddress = RegionPolicy.serverAddress(for: region)
-        var providerConfig: [String: Any] = ["configProfile": "review-safe-profile-v1", "region": region.id]
+        var providerConfig: [String: Any] = [
+            "configProfile": "review-safe-profile-v1",
+            "region": region.id,
+            "regionMode": RegionStore.isServerDecided() ? "server" : "explicit",
+        ]
         // Pass the device token + API base so the tunnel extension can fetch a
         // per-device sing-box config (its own uuid) from the backend. The
         // extension falls back to the bundled config if this is absent or fails.

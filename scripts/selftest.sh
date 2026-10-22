@@ -13,8 +13,10 @@ OUT="$(mktemp -d)/rfv-selftest"
 swiftc -o "$OUT" \
   App/Regions.swift \
   App/StartAttempt.swift \
+  App/AccessExpiry.swift \
   App/UsageMetrics.swift \
   App/APIClient.swift \
+  Tunnel/RegionFollow.swift \
   Tunnel/RuntimeConfigRequest.swift \
   Tunnel/SharedContainer.swift \
   Tunnel/StatsSnapshot.swift \

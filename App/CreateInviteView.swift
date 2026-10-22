@@ -9,6 +9,10 @@ struct CreateInviteView: View {
     @State private var label = ""
     @State private var maxDevices = 1
     @State private var monthlyQuotaGB = 200
+    @State private var region = RegionPolicy.defaultID
+    @State private var access = AccessChoice()
+    /// Does the backend know about region / access? Asked once; older backends do not, and then the controls stay hidden.
+    @State private var supportsAccess = false
     @State private var createdInvite: CreatedInvite?
     @State private var errorMessage: String?
     @State private var isCreating = false
@@ -17,7 +21,7 @@ struct CreateInviteView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                Section("New Invite") {
                     TextField("Invite code", text: $code)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -26,10 +30,16 @@ struct CreateInviteView: View {
                         .textInputAutocapitalization(.words)
                     Stepper("Device limit: \(maxDevices)", value: $maxDevices, in: 1...100)
                     Stepper("Monthly limit: \(monthlyQuotaGB) GB", value: $monthlyQuotaGB, in: 1...2000, step: 50)
-                } header: {
-                    Text("New Invite")
-                } footer: {
-                    Text("The code has no required format and no expiration date. Test invites default to one device and a 200 GB monthly limit.")
+                }
+
+                if supportsAccess {
+                    Section {
+                        InviteAccessRows(
+                            region: $region,
+                            access: $access,
+                            regionOptions: InviteRegionOptions.options(ownerRegions: appState.regions, current: nil)
+                        )
+                    }
                 }
 
                 if let createdInvite {
@@ -39,7 +49,12 @@ struct CreateInviteView: View {
                         LabeledContent("Label", value: createdInvite.label)
                         LabeledContent("Device limit", value: "\(createdInvite.maxDevices)")
                         LabeledContent("Monthly limit", value: "\(createdInvite.monthlyQuotaGB) GB")
-                        LabeledContent("Expires", value: "Never")
+                        if supportsAccess {
+                            LabeledContent("Region", value: RegionPolicy.name(of: region, in: InviteRegionOptions.options(ownerRegions: appState.regions, current: region)))
+                            LabeledContent("Access", value: access.summary)
+                        } else {
+                            LabeledContent("Expires", value: "Never")
+                        }
                         Button {
                             UIPasteboard.general.string = createdInvite.code
                             copied = true
@@ -58,6 +73,7 @@ struct CreateInviteView: View {
                 }
             }
             .navigationTitle("Create Invite")
+            .task { await probeAccessSupport() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
@@ -78,6 +94,18 @@ struct CreateInviteView: View {
         }
     }
 
+    private func probeAccessSupport() async {
+        #if DEBUG
+        if ScreenshotMode.isOn {
+            supportsAccess = true
+            return
+        }
+        #endif
+        guard let token = appState.currentProfile?.token,
+              let result = try? await APIClient.shared.fetchOwnerInvites(token: token) else { return }
+        supportsAccess = result.access.values.contains { $0.isPresent }
+    }
+
     private func createInvite() {
         guard let profile = appState.currentProfile else {
             errorMessage = "No active profile"
@@ -93,15 +121,17 @@ struct CreateInviteView: View {
         isCreating = true
         errorMessage = nil
         copied = false
+        let body = InviteBody.create(
+            code: trimmedCode,
+            label: trimmedLabel.isEmpty ? nil : trimmedLabel,
+            maxDevices: maxDevices,
+            monthlyQuotaGB: monthlyQuotaGB,
+            region: supportsAccess ? region : nil,
+            access: supportsAccess ? access : nil
+        )
         Task {
             do {
-                let invite = try await APIClient.shared.createInvite(
-                    code: trimmedCode,
-                    label: trimmedLabel.isEmpty ? nil : trimmedLabel,
-                    maxDevices: maxDevices,
-                    monthlyQuotaGB: monthlyQuotaGB,
-                    token: profile.token
-                )
+                let invite = try await APIClient.shared.createInvite(body: body, token: profile.token)
                 createdInvite = invite
                 code = invite.code
                 label = invite.label

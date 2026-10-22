@@ -6,6 +6,8 @@ struct RedFluentVPNApp: App {
     @StateObject private var tunnelManager = TunnelManager()
     @StateObject private var statsStore = StatsStore()
     @StateObject private var quotaStore = QuotaStore()
+    /// When the app last reconnected by itself after a server stop (at most once in 30 minutes).
+    @State private var lastAutoReconnect = Date.distantPast
 
     var body: some Scene {
         WindowGroup {
@@ -19,6 +21,15 @@ struct RedFluentVPNApp: App {
                     // Any change of the selection (picker, or a server-side reset): reconnect when
                     // connected, otherwise keep the saved tunnel configuration in step with it.
                     Task { await tunnelManager.selectedRegionChanged() }
+                }
+                .onChange(of: tunnelManager.serverStop) { _, stop in
+                    guard let stop else { return }
+                    Task { await handleServerStop(stop) }
+                }
+                .onChange(of: appState.expiry.expired) { _, expired in
+                    // The account just turned out to be expired: do not keep the tunnel up.
+                    guard expired, tunnelManager.status.isConnected else { return }
+                    Task { await tunnelManager.disconnect() }
                 }
                 .task {
                     #if DEBUG
@@ -34,5 +45,17 @@ struct RedFluentVPNApp: App {
                     await appState.refresh()
                 }
         }
+    }
+
+    /// The tunnel stopped because the server ended access. /profile says what that means: Expired state, or
+    /// Revoked screen. A "revoked" stop with a profile that is fine only meant a stale login token in the
+    /// tunnel's saved configuration, so start again once with the current one.
+    private func handleServerStop(_ stop: ServerStop) async {
+        let answered = await appState.refresh()
+        tunnelManager.acknowledgeServerStop()
+        guard answered, stop == .revoked, case .activated = appState.activation, !appState.expiry.expired,
+              Date().timeIntervalSince(lastAutoReconnect) > 1800 else { return }
+        lastAutoReconnect = Date()
+        await tunnelManager.connect()
     }
 }

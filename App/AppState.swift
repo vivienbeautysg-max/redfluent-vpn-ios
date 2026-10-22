@@ -16,6 +16,8 @@ final class AppState: ObservableObject {
     /// Regions the server offers this device (Tokyo only unless the backend says more) and the chosen one.
     @Published private(set) var regions: [VPNRegion] = [.tokyo]
     @Published private(set) var selectedRegionID: String = RegionPolicy.defaultID
+    /// Account expiry from the last /profile (1.2 backends): drives the Expired state on the dashboard.
+    @Published private(set) var expiry: ExpiryInfo = .none
 
     private let api = APIClient.shared
 
@@ -25,12 +27,14 @@ final class AppState: ObservableObject {
     init() {
         regions = RegionStore.offered()
         selectedRegionID = RegionPolicy.resolveSelection(stored: RegionStore.selectedID(), offered: regions)
+        expiry = ExpiryStore.load()
         #if DEBUG
         if ScreenshotMode.isOn {
             activation = .activated(ScreenshotMode.profile)
             appleLinked = true          // 截图里不出现绑定卡片
             regions = ScreenshotMode.regions
             selectedRegionID = ScreenshotMode.selectedRegionID
+            expiry = ScreenshotMode.expiry
             return
         }
         #endif
@@ -85,6 +89,13 @@ final class AppState: ObservableObject {
     /// Back to Tokyo only (sign-out / revoked): the next activation may be a different invite.
     private func resetRegions() {
         applyOfferedRegions([.tokyo])
+        applyExpiry(.none)
+    }
+
+    private func applyExpiry(_ info: ExpiryInfo) {
+        guard info != expiry else { return }
+        expiry = info
+        ExpiryStore.save(info)
     }
 
     /// 把当前邀请码绑到 Apple ID。失败不影响已经能用的 VPN，只是没绑上。
@@ -149,11 +160,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refresh() async {
+    /// Asks /profile. True when it answered, i.e. what the state now says is current.
+    @discardableResult
+    func refresh() async -> Bool {
         #if DEBUG
-        if ScreenshotMode.isOn { return }   // 演示资料不该被真实后端覆盖
+        if ScreenshotMode.isOn { return false }   // 演示资料不该被真实后端覆盖
         #endif
-        guard case .activated(let profile) = activation else { return }
+        guard case .activated(let profile) = activation else { return false }
         do {
             let status = try await api.fetchProfile(token: profile.token)
             if !status.enabled {
@@ -162,10 +175,15 @@ final class AppState: ObservableObject {
                 activation = .revoked
             } else {
                 applyOfferedRegions(status.regions)
+                applyExpiry(ExpiryInfo(expired: status.expired, expiresAt: status.expiresAt, daysLeft: status.daysLeft))
+                // Not revoked and not expired: lift a server stop the tunnel left behind, so it may start on its own again.
+                if !status.expired, TunnelStartError.readStandingStop() != nil { TunnelStartError.clear() }
             }
+            return true
         } catch {
             // Network failure during refresh is non-fatal — we keep the cached profile.
             // Don't downgrade activation just because we lost connectivity.
+            return false
         }
     }
 

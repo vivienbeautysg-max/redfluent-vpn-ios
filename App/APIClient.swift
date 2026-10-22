@@ -19,6 +19,10 @@ struct ProfileStatus: Codable, Equatable {
     let monthlyQuotaGB: Int?
     /// Only sent by multi-region backends; an older server means Tokyo only.
     var regions: [VPNRegion] = [.tokyo]
+    /// Account expiry (1.2 backends only): not expired, no date.
+    var expired: Bool = false
+    var expiresAt: String?
+    var daysLeft: Int?
 }
 
 /// Wire format of GET /profile. `regions` comes from multi-region backends only; a missing or
@@ -34,6 +38,10 @@ struct ProfileResponse: Decodable {
     let routingMode: String?
     let monthlyQuotaGB: Int?
     let regions: LossyArray<VPNRegion>?
+    // 1.2 expiry fields: a wrong type reads as missing, never as a failed /profile.
+    let expired: Lenient<Bool>?
+    let expiresAt: Lenient<String>?
+    let daysLeft: Lenient<Int>?
 
     func status() throws -> ProfileStatus {
         guard ok,
@@ -52,7 +60,10 @@ struct ProfileResponse: Decodable {
             serverRegion: region,
             routingMode: routing,
             monthlyQuotaGB: monthlyQuotaGB,
-            regions: RegionPolicy.offered(from: regions?.elements)
+            regions: RegionPolicy.offered(from: regions?.elements),
+            expired: expired?.value ?? false,
+            expiresAt: expiresAt?.value,
+            daysLeft: daysLeft?.value
         )
     }
 }
@@ -140,6 +151,46 @@ struct OwnerDevicesResponse: Decodable {
     }
 }
 
+/// Result of GET /owner/invites. `access` (region, duration and expiry per invite code) is empty on a backend
+/// that predates 1.2, and a malformed value there can never fail the invite list.
+struct OwnerInvitesResult {
+    let invites: [OwnerInvite]
+    let access: [String: InviteAccess]
+}
+
+struct OwnerInvitesResponse: Decodable {
+    let ok: Bool
+    let error: String?
+    let invites: [OwnerInvite]?
+    let access: [String: InviteAccess]
+
+    private struct AccessEntry: Decodable {
+        let code: String
+        let access: InviteAccess
+
+        private enum CodingKeys: String, CodingKey { case code }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            code = try c.decode(String.self, forKey: .code)
+            access = try InviteAccess(from: decoder)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case ok, error, invites }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decode(Bool.self, forKey: .ok)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        invites = try c.decodeIfPresent([OwnerInvite].self, forKey: .invites)
+        let entries = (try? c.decodeIfPresent(LossyArray<AccessEntry>.self, forKey: .invites))?.elements ?? []
+        var byCode: [String: InviteAccess] = [:]
+        for entry in entries where entry.access.isPresent { byCode[entry.code] = entry.access }
+        access = byCode
+    }
+}
+
 struct OwnerActivationEvent: Codable, Equatable, Identifiable {
     let id: String
     let inviteCodeInput: String?
@@ -188,6 +239,8 @@ enum APIError: Error, LocalizedError {
             return "This invite has reached its device limit. Ask the owner to raise the limit or revoke an old device."
         case "owner device cannot be revoked here":
             return "Owner devices are protected and cannot be revoked here."
+        case "region unavailable":
+            return "Region unavailable."
         default:
             return "Server error \(code): \(reason)"
         }
@@ -343,61 +396,34 @@ actor APIClient {
         return try env.status()
     }
 
-    func createInvite(code: String, label: String?, maxDevices: Int, monthlyQuotaGB: Int, token: String) async throws -> CreatedInvite {
-        struct Request: Encodable {
-            let code: String
-            let label: String?
-            let maxDevices: Int
-            let monthlyQuotaGB: Int
-        }
+    func createInvite(body: [String: JSONValue], token: String) async throws -> CreatedInvite {
         struct Envelope: Decodable {
             let ok: Bool
             let error: String?
             let invite: CreatedInvite?
         }
-        let env: Envelope = try await post(
-            path: "/owner/invites",
-            body: Request(code: code, label: label, maxDevices: maxDevices, monthlyQuotaGB: monthlyQuotaGB),
-            token: token
-        )
+        let env: Envelope = try await post(path: "/owner/invites", body: body, token: token)
         guard env.ok, let invite = env.invite else {
             throw APIError.status(403, env.error ?? "create invite rejected")
         }
         return invite
     }
 
-    func fetchOwnerInvites(token: String) async throws -> [OwnerInvite] {
-        struct Envelope: Decodable {
-            let ok: Bool
-            let error: String?
-            let invites: [OwnerInvite]?
-        }
-        let env: Envelope = try await get(path: "/owner/invites", token: token)
+    func fetchOwnerInvites(token: String) async throws -> OwnerInvitesResult {
+        let env: OwnerInvitesResponse = try await get(path: "/owner/invites", token: token)
         guard env.ok, let invites = env.invites else {
             throw APIError.status(403, env.error ?? "owner invites rejected")
         }
-        return invites
+        return OwnerInvitesResult(invites: invites, access: env.access)
     }
 
-    func updateOwnerInvite(_ invite: OwnerInvite, newCode: String, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async throws -> OwnerInvite {
-        struct Request: Encodable {
-            let code: String
-            let newCode: String
-            let label: String
-            let maxDevices: Int
-            let monthlyQuotaGB: Int
-            let enabled: Bool
-        }
+    func updateOwnerInvite(body: [String: JSONValue], token: String) async throws -> OwnerInvite {
         struct Envelope: Decodable {
             let ok: Bool
             let error: String?
             let invite: OwnerInvite?
         }
-        let env: Envelope = try await post(
-            path: "/owner/invites/update",
-            body: Request(code: invite.code, newCode: newCode, label: label, maxDevices: maxDevices, monthlyQuotaGB: monthlyQuotaGB, enabled: enabled),
-            token: token
-        )
+        let env: Envelope = try await post(path: "/owner/invites/update", body: body, token: token)
         guard env.ok, let updated = env.invite else {
             throw APIError.status(403, env.error ?? "update invite rejected")
         }

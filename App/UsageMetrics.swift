@@ -158,23 +158,11 @@ enum UsageMetrics {
 
     /// "since 1 Oct" from the period start (UTC); nil when the backend sent no usable start.
     static func periodText(_ period: UsagePeriod?) -> String? {
-        guard let start = period?.start, let date = parseISO(start) else { return nil }
+        guard let start = period?.start, let date = ISODate.parse(start) else { return nil }
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(secondsFromGMT: 0)
         f.dateFormat = "d MMM"
         return "since " + f.string(from: date)
-    }
-
-    private static func parseISO(_ s: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = withFraction.date(from: s) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        if let d = plain.date(from: s) { return d }
-        let dateOnly = ISO8601DateFormatter()
-        dateOnly.formatOptions = [.withFullDate]
-        return dateOnly.date(from: s)
     }
 }

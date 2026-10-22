@@ -48,6 +48,15 @@ struct LossyArray<Element: Decodable>: Decodable {
     }
 }
 
+/// Decodes a value and reads a wrong type as missing, for fields added by newer backends.
+struct Lenient<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
+    }
+}
+
 enum RegionPolicy {
     static let defaultID = "tokyo"
 
@@ -89,20 +98,28 @@ enum RegionPolicy {
     static func serverAddress(for region: VPNRegion) -> String { "RedFluent \(region.name)" }
 
     /// providerConfiguration with this region, keeping everything else (token, apiBase, ...).
-    static func providerConfiguration(_ existing: [String: Any]?, region: VPNRegion) -> [String: Any] {
+    /// `serverDecides`: everyone but the owner. The tunnel then asks for its config without a region
+    /// parameter and follows whatever the server assigns; `region` is only the last region it knew of.
+    static func providerConfiguration(_ existing: [String: Any]?, region: VPNRegion,
+                                      serverDecides: Bool = false) -> [String: Any] {
         var config = existing ?? [:]
         config["region"] = region.id
+        config["regionMode"] = serverDecides ? "server" : "explicit"
         return config
     }
 
     /// A failed start of a non-default region must not leave on-demand retrying it for ever.
     static func disablesOnDemandAfterFailure(regionID: String) -> Bool { !isDefault(regionID) }
 
-    /// Region name for the Server row. Several regions: what the tunnel really started with while
-    /// connected ("—" when that cannot be read), otherwise the selection. One region: the profile's.
+    /// Region name for the Server row. Several regions (owner): what the tunnel really started with while
+    /// connected ("—" when that cannot be read), otherwise the selection. One region (everyone else, the
+    /// server decides): what the tunnel runs while connected, else the region the server last assigned.
     static func serverDisplayName(regions: [VPNRegion], selectedID: String, connected: Bool,
                                   active: ActiveRegion?, profileRegion: String?) -> String? {
-        guard regions.count > 1 else { return profileRegion }
+        guard regions.count > 1 else {
+            if connected, let active { return active.name }
+            return regions.first?.name ?? profileRegion
+        }
         if connected { return active?.name ?? "—" }
         return name(of: selectedID, in: regions)
     }
@@ -136,6 +153,11 @@ enum RegionStore {
     /// without the suite the active region is simply unknown.
     static func sharedDefaults() -> UserDefaults? {
         UserDefaults(suiteName: appGroupID)
+    }
+
+    /// Only the owner is offered more than one region and picks by hand; for everyone else the server decides.
+    static func isServerDecided(_ d: UserDefaults? = sharedDefaults()) -> Bool {
+        offered(d).count <= 1
     }
 
     static func selectedID(_ d: UserDefaults? = sharedDefaults()) -> String {
@@ -175,16 +197,31 @@ enum RegionStore {
     }
 }
 
-/// Why the last tunnel start failed. The extension writes it just before it throws and the app reads
-/// it: a file in the App Group container, so it does not depend on the order of NetworkExtension
-/// status changes or on a preferences cache.
+/// Why the server ended this device's access. Raw values must stay identical to StopKind in the tunnel target.
+enum ServerStop: String, Equatable {
+    case expired
+    case revoked
+}
+
+/// Why the tunnel last failed to start, or was stopped by the server. The extension writes it just before it
+/// throws / cancels and the app reads it: a file in the App Group container, so it does not depend on the
+/// order of NetworkExtension status changes or on a preferences cache.
 enum TunnelStartError {
     /// Must stay identical to SharedContainer.startErrorFileName in the tunnel target.
     static let fileName = "start-error.json"
 
+    /// One stored record. `kind` is "start" (a failed start), "expired" or "revoked" (the server ended access).
+    struct Entry: Equatable {
+        let kind: String
+        let message: String
+
+        var stop: ServerStop? { ServerStop(rawValue: kind) }
+    }
+
     private struct Record: Decodable {
         let message: String
         let at: Double
+        let kind: String?
     }
 
     static func fileURL() -> URL? {
@@ -193,22 +230,47 @@ enum TunnelStartError {
             .appendingPathComponent(fileName)
     }
 
-    /// The message of a stored record, but only if it is not older than `since` (1 s of slack):
-    /// an error from an earlier attempt must never be shown for a newer one.
-    static func message(from data: Data?, since: Date) -> String? {
+    /// The stored record, but only if it is not older than `since` (1 s of slack): an error from an
+    /// earlier attempt must never be shown for a newer one.
+    static func entry(from data: Data?, since: Date) -> Entry? {
         guard let data,
               let record = try? JSONDecoder().decode(Record.self, from: data),
               !record.message.isEmpty,
               record.at >= since.timeIntervalSince1970 - 1
         else { return nil }
-        return record.message
+        return Entry(kind: record.kind ?? "start", message: record.message)
+    }
+
+    /// The message of a failed start (not of a server stop) newer than `since`.
+    static func message(from data: Data?, since: Date) -> String? {
+        guard let entry = entry(from: data, since: since), entry.kind == "start" else { return nil }
+        return entry.message
     }
 
     static func read(since: Date) -> String? {
-        message(from: fileURL().flatMap { try? Data(contentsOf: $0) }, since: since)
+        message(from: storedData(), since: since)
+    }
+
+    /// The newest record if it is at most `maxAge` seconds old, whatever its kind.
+    static func readRecent(maxAge: TimeInterval = 120, now: Date = Date()) -> Entry? {
+        entry(from: storedData(), since: now.addingTimeInterval(-maxAge))
+    }
+
+    /// A server stop that is still standing, however old: it keeps the extension from starting on its own
+    /// until the app has checked /profile and cleared it.
+    static func standingStop(from data: Data?) -> ServerStop? {
+        entry(from: data, since: .distantPast)?.stop
+    }
+
+    static func readStandingStop() -> ServerStop? {
+        standingStop(from: storedData())
     }
 
     static func clear() {
         if let url = fileURL() { try? FileManager.default.removeItem(at: url) }
+    }
+
+    private static func storedData() -> Data? {
+        fileURL().flatMap { try? Data(contentsOf: $0) }
     }
 }

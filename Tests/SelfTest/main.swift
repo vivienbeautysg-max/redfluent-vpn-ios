@@ -425,6 +425,245 @@ if let total = UsageMetrics.groups(devices: plainDevices, usage: weird).first?.t
     check(total.isFinite && total >= 0, "group total is finite")
 } else { check(false, "weird usage produced no group") }
 
+// MARK: 13. 1.2: a device whose region the server decides sends no region parameter
+
+section("13. 1.2: server-decided devices (everyone but the owner) request without a region parameter")
+
+check(RuntimeConfigRequest.regionParameter(region: "singapore", serverDecides: true) == nil,
+      "server-decided + assigned Singapore: no region parameter")
+check(RuntimeConfigRequest.regionParameter(region: "tokyo", serverDecides: true) == nil, "server-decided + Tokyo: no region parameter")
+check(RuntimeConfigRequest.regionParameter(region: "singapore", serverDecides: false) == "singapore", "owner: the picked region is sent")
+check(RuntimeConfigRequest.regionParameter(region: "Tokyo", serverDecides: false) == nil, "owner on Tokyo: today's request")
+check(RuntimeConfigRequest.url(base: base, region: RuntimeConfigRequest.regionParameter(region: "singapore", serverDecides: true))?.absoluteString
+      == base + "/device/runtime-config", "non-owner assigned Singapore: the URL has no query at all")
+check(RuntimeConfigRequest.url(base: base, region: nil)?.absoluteString == base + "/device/runtime-config", "url(region: nil) = today's request")
+check(RuntimeConfigRequest.url(base: base, region: RuntimeConfigRequest.regionParameter(region: "singapore", serverDecides: false))?.query == "region=singapore",
+      "owner on Singapore: ?region=singapore")
+let serverCfg = RegionPolicy.providerConfiguration(["token": "T"], region: VPNRegion(id: "singapore", name: "Singapore"), serverDecides: true)
+check(serverCfg["regionMode"] as? String == "server" && serverCfg["region"] as? String == "singapore" && serverCfg["token"] as? String == "T",
+      "saved configuration says 'server' mode, keeps the last known region and the token")
+check(RegionPolicy.providerConfiguration(nil, region: .tokyo, serverDecides: false)["regionMode"] as? String == "explicit", "owner: 'explicit' mode")
+let modeSuite = UserDefaults(suiteName: suiteName + ".mode")!
+RegionStore.saveOffered([.tokyo], to: modeSuite)
+check(RegionStore.isServerDecided(modeSuite), "one offered region -> the server decides")
+RegionStore.saveOffered(both, to: modeSuite)
+check(!RegionStore.isServerDecided(modeSuite), "several offered regions (owner) -> picked by hand")
+modeSuite.removePersistentDomain(forName: suiteName + ".mode")
+check(RegionPolicy.serverDisplayName(regions: [VPNRegion(id: "singapore", name: "Singapore", isDefault: true)], selectedID: "singapore",
+                                     connected: false, active: nil, profileRegion: "Tokyo") == "Singapore",
+      "member assigned Singapore: the server's region, not a stale profile copy")
+check(RegionPolicy.serverDisplayName(regions: [.tokyo], selectedID: "tokyo", connected: true, active: sg, profileRegion: "Tokyo") == "Singapore",
+      "member whose tunnel followed to Singapore: what the tunnel runs")
+
+// MARK: 14. the follow decision (pure)
+
+section("14. follow decision: same region keeps, other region reloads, expired/revoked stops, network errors keep")
+
+check(FollowPolicy.decide(active: "tokyo", outcome: .config(region: "tokyo")) == .keep, "same region -> keep (no-op)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .config(region: "Tokyo")) == .keep, "same region in another case -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .config(region: "singapore")) == .reload(region: "singapore"), "different region -> reload")
+check(FollowPolicy.decide(active: "singapore", outcome: .config(region: "tokyo")) == .reload(region: "tokyo"), "back to Tokyo -> reload")
+check(FollowPolicy.decide(active: "tokyo", outcome: .config(region: nil)) == .keep, "answer without a region (older backend) -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .config(region: "")) == .keep, "empty region -> keep")
+check(FollowPolicy.decide(active: "singapore", outcome: .http(status: 403, error: "invite expired")) == .stop(.expired), "403 invite expired -> stop (expired)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 401, error: "unauthorized")) == .stop(.revoked), "401 -> stop (revoked)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 403, error: "device revoked")) == .stop(.revoked), "403 device revoked -> stop (revoked)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 403, error: "region not allowed")) == .keep, "403 region not allowed -> keep (about the region, not the account)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 503, error: "region unavailable")) == .keep, "503 region unavailable -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 500, error: nil)) == .keep, "500 -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 502, error: "bad gateway")) == .keep, "502 -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 429, error: "slow down")) == .keep, "429 -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 403, error: nil)) == .keep, "403 without the server's JSON error (a CDN page) -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .http(status: 401, error: nil)) == .keep, "401 without a JSON error -> keep")
+check(FollowPolicy.decide(active: "singapore", outcome: .http(status: 200, error: "region not confirmed")) == .keep, "region not confirmed -> keep")
+check(FollowPolicy.decide(active: "tokyo", outcome: .network) == .keep, "network error -> keep running, retry next tick")
+check(FollowPolicy.stopKind(status: 401, error: "token expired") == .revoked, "an expired login token (401) is not 'invite expired'")
+check(FollowPolicy.blocksStart(.http(status: 403, error: "invite expired")), "start: an expired invite never connects")
+check(!FollowPolicy.blocksStart(.http(status: 401, error: "unauthorized")), "start: 401 keeps today's behaviour")
+check(!FollowPolicy.blocksStart(.http(status: 403, error: "device revoked")), "start: revoked keeps today's behaviour")
+check(!FollowPolicy.blocksStart(.network) && !FollowPolicy.blocksStart(.config(region: "tokyo")), "start: network / success are not blocked")
+check(FollowPolicy.interval == 300, "one check every 5 minutes")
+check(FollowPolicy.minGap >= 30 && FollowPolicy.pathDebounce >= 10, "checks are rate limited (battery)")
+let wifi = FollowPolicy.PathSignature(satisfied: true, interfaces: ["en0"])
+let cell = FollowPolicy.PathSignature(satisfied: true, interfaces: ["pdp_ip0"])
+let none = FollowPolicy.PathSignature(satisfied: false, interfaces: [])
+check(!FollowPolicy.pathChangeWarrantsCheck(previous: nil, current: wifi), "first path observation is only the current state")
+check(!FollowPolicy.pathChangeWarrantsCheck(previous: wifi, current: wifi), "same path -> no check")
+check(FollowPolicy.pathChangeWarrantsCheck(previous: wifi, current: cell), "Wi-Fi -> cellular -> check")
+check(!FollowPolicy.pathChangeWarrantsCheck(previous: wifi, current: none), "network lost -> nothing to fetch over")
+check(FollowPolicy.pathChangeWarrantsCheck(previous: none, current: wifi), "network back -> check")
+
+// MARK: 15. the stop record (extension -> app)
+
+section("15. server stop record: kinds, lock, parity with the app")
+
+let stopAt = Date(timeIntervalSince1970: 3_000_000)
+let expiredRec = SharedContainer.encodeStartError(message: StopKind.expired.message, at: stopAt, kind: StopKind.expired.rawValue)
+let revokedRec = SharedContainer.encodeStartError(message: StopKind.revoked.message, at: stopAt, kind: StopKind.revoked.rawValue)
+let startRec = SharedContainer.encodeStartError(message: "boom", at: stopAt)
+check(SharedContainer.stopKind(in: expiredRec) == .expired && SharedContainer.stopKind(in: revokedRec) == .revoked, "extension reads the stop kinds back")
+check(SharedContainer.stopKind(in: startRec) == nil && SharedContainer.stopKind(in: nil) == nil
+      && SharedContainer.stopKind(in: Data("junk".utf8)) == nil, "a plain start failure / garbage is not a stop lock")
+check(TunnelStartError.standingStop(from: expiredRec) == .expired && TunnelStartError.standingStop(from: revokedRec) == .revoked, "app sees the same stop kinds")
+check(TunnelStartError.standingStop(from: startRec) == nil, "app: a start failure is not a stop")
+check(TunnelStartError.standingStop(from: expiredRec) == ServerStop(rawValue: StopKind.expired.rawValue), "app and extension use the same raw values")
+check(Set(["expired", "revoked"]) == Set([StopKind.expired.rawValue, StopKind.revoked.rawValue])
+      && ServerStop(rawValue: "expired") != nil && ServerStop(rawValue: "revoked") != nil, "ServerStop and StopKind raw values match")
+check(TunnelStartError.message(from: expiredRec, since: stopAt - 5) == nil, "a server stop is never shown as a failed start")
+check(TunnelStartError.message(from: startRec, since: stopAt - 5) == "boom", "a start failure still is")
+check(TunnelStartError.entry(from: expiredRec, since: stopAt - 5)?.stop == .expired && TunnelStartError.entry(from: expiredRec, since: stopAt - 5)?.message == "Invite expired",
+      "entry carries kind and the text for Diagnostics")
+check(TunnelStartError.entry(from: expiredRec, since: stopAt + 600) == nil, "recent-only reads ignore an old record")
+check(TunnelStartError.standingStop(from: expiredRec) != nil, "the lock does not depend on age")
+check(StopKind.expired.message == "Invite expired" && StopKind.revoked.message == "Access revoked", "texts shown to the user")
+
+// MARK: 16. expired / days-left display
+
+section("16. dashboard expiry text")
+
+let utc = TimeZone(secondsFromGMT: 0)!
+let sgt = TimeZone(identifier: "Asia/Singapore")!
+let expiredInfo = ExpiryInfo(expired: true, expiresAt: "2026-11-03T04:00:00.000Z", daysLeft: nil)
+check(ExpiryDisplay.expiredText(expiredInfo, timeZone: utc) == "Expired \u{00B7} 3 Nov 2026", "Expired · 3 Nov 2026")
+check(ExpiryDisplay.expiredText(ExpiryInfo(expired: true, expiresAt: nil, daysLeft: nil), timeZone: utc) == "Expired", "expired without a date -> just Expired")
+check(ExpiryDisplay.expiredText(ExpiryInfo(expired: false, expiresAt: "2026-11-03T04:00:00Z", daysLeft: 3), timeZone: utc) == nil, "not expired -> no Expired text")
+check(ExpiryDisplay.expiredText(ExpiryInfo(expired: true, expiresAt: "2026-11-03T20:00:00Z", daysLeft: nil), timeZone: sgt) == "Expired \u{00B7} 4 Nov 2026",
+      "the date is shown in the device's time zone")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: 7)) == "7 days left", "7 days left is shown")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: 8)) == nil, "more than a week left -> nothing")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: 29)) == nil, "29 days left -> nothing")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: 1)) == "1 day left", "1 day left")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: 0)) == "0 days left", "0 days left")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: false, expiresAt: nil, daysLeft: nil)) == nil, "no daysLeft -> nothing")
+check(ExpiryDisplay.daysLeftText(ExpiryInfo(expired: true, expiresAt: nil, daysLeft: 3)) == nil, "expired never shows days left")
+check(ExpiryInfo.none.expired == false && ExpiryDisplay.expiredText(.none) == nil && ExpiryDisplay.daysLeftText(.none) == nil, "no expiry info (older backend) shows nothing")
+let expirySuite = UserDefaults(suiteName: suiteName + ".expiry")!
+check(ExpiryStore.load(expirySuite) == .none, "no stored expiry -> none")
+ExpiryStore.save(expiredInfo, to: expirySuite)
+check(ExpiryStore.load(expirySuite) == expiredInfo, "expiry survives a cold start")
+ExpiryStore.save(.none, to: expirySuite)
+check(ExpiryStore.load(expirySuite) == .none, "and clears when the profile says not expired")
+expirySuite.removePersistentDomain(forName: suiteName + ".expiry")
+
+// MARK: 17. /profile expiry fields
+
+section("17. /profile: expiry fields are optional and a wrong type never fails the profile")
+
+do {
+    let profileHead = #""ok":true,"enabled":true,"profileId":"p","ownerLabel":"x","serverRegion":"Singapore","routingMode":"smart""#
+    let expiredProfile = try decode(ProfileResponse.self, "{\(profileHead),\"regions\":[{\"id\":\"singapore\",\"name\":\"Singapore\",\"isDefault\":true}],\"expired\":true,\"expiresAt\":\"2026-10-03T04:00:00.000Z\",\"daysLeft\":0}").status()
+    check(expiredProfile.expired && expiredProfile.expiresAt == "2026-10-03T04:00:00.000Z" && expiredProfile.daysLeft == 0, "expired profile decodes")
+    check(expiredProfile.regions.map(\.id) == ["singapore"] && expiredProfile.enabled, "expired is still 200 with enabled unchanged and the assigned region")
+    let plain = try decode(ProfileResponse.self, "{\(profileHead)}").status()
+    check(!plain.expired && plain.expiresAt == nil && plain.daysLeft == nil, "older backend: no expiry")
+    let soon = try decode(ProfileResponse.self, "{\(profileHead),\"expired\":false,\"expiresAt\":\"2026-10-27T04:00:00.000Z\",\"daysLeft\":5}").status()
+    check(!soon.expired && soon.daysLeft == 5, "5 days left decodes")
+    let nulls = try decode(ProfileResponse.self, "{\(profileHead),\"expired\":null,\"expiresAt\":null,\"daysLeft\":null}").status()
+    check(!nulls.expired && nulls.expiresAt == nil && nulls.daysLeft == nil, "null expiry fields")
+    let revokedHead = #""ok":true,"enabled":false,"profileId":"p","ownerLabel":"x","serverRegion":"Singapore","routingMode":"smart""#
+    let bad = try decode(ProfileResponse.self, "{\(revokedHead),\"expired\":\"yes\",\"expiresAt\":5,\"daysLeft\":\"x\",\"regions\":\"oops\"}").status()
+    check(bad.enabled == false && !bad.expired && bad.expiresAt == nil && bad.daysLeft == nil && bad.regions == [.tokyo],
+          "wrong-typed expiry fields + regions together: profile still decodes, revoke flag kept")
+} catch { check(false, "profile expiry decoding threw: \(error)") }
+
+// MARK: 18. /owner/invites: region + access fields
+
+section("18. /owner/invites: region, duration and expiry per invite (optional)")
+
+let inviteBase = #""code":"RF-A","label":"Alice","maxDevices":3,"activeDevices":1,"monthlyQuotaGB":200,"enabled":true,"expiresAt":null,"createdAt":"2026-06-01 08:00:00""#
+do {
+    let newInvites = try decode(OwnerInvitesResponse.self, """
+    {"ok":true,"invites":[
+     {\(inviteBase),"region":"singapore","durationDays":30,"activatedAt":"2026-10-22T01:00:00.000Z","effectiveExpiresAt":"2026-11-21T01:00:00.000Z","daysLeft":29,"expired":false},
+     {"code":"RF-B","label":"Ben","maxDevices":1,"activeDevices":0,"monthlyQuotaGB":200,"enabled":true,"createdAt":"x","region":"tokyo","durationDays":null,"activatedAt":null,"effectiveExpiresAt":null,"daysLeft":null,"expired":false}
+    ]}
+    """)
+    check(newInvites.invites?.count == 2, "both invites decode")
+    let a = newInvites.access["RF-A"]
+    check(a?.region == "singapore" && a?.durationDays == 30 && a?.daysLeft == 29 && a?.expired == false, "access fields decode")
+    check(InviteStatusLine.status(a, timeZone: utc) == InviteStatus(text: "Expires 21 Nov 2026 \u{00B7} 29 days left", tone: .neutral),
+          "status line: Expires 21 Nov 2026 · 29 days left")
+    check(newInvites.access["RF-B"]?.isPresent == true && InviteStatusLine.status(newInvites.access["RF-B"]) == nil, "no limit -> region only, no status line")
+    let oldInvites = try decode(OwnerInvitesResponse.self, #"{"ok":true,"invites":[{\#(inviteBase)}]}"#)
+    check(oldInvites.invites?.count == 1 && oldInvites.access.isEmpty, "older backend: list decodes, no access info (controls stay hidden)")
+    let brokenInvites = try decode(OwnerInvitesResponse.self, """
+    {"ok":true,"invites":[{\(inviteBase),"region":5,"durationDays":"x","activatedAt":false,"effectiveExpiresAt":[],"daysLeft":"?","expired":"no"},
+                          {\(inviteBase.replacingOccurrences(of: "RF-A", with: "RF-C")),"region":"tokyo","expired":false}]}
+    """)
+    check(brokenInvites.invites?.count == 2, "wrong-typed access fields never break the invite list")
+    check(brokenInvites.access["RF-A"] == nil && brokenInvites.access["RF-C"]?.region == "tokyo", "an invite whose fields are all unusable has no access info; another one keeps its own")
+} catch { check(false, "owner invites decoding threw: \(error)") }
+
+section("19. invite status line")
+
+func status(_ access: InviteAccess?) -> InviteStatus? { InviteStatusLine.status(access, timeZone: utc) }
+check(status(InviteAccess(durationDays: 30, effectiveExpiresAt: "2026-10-20T01:00:00.000Z", expired: true)) == InviteStatus(text: "Expired 20 Oct 2026", tone: .danger),
+      "Expired 20 Oct 2026 (red)")
+check(status(InviteAccess(durationDays: 30, expired: true))?.text == "Expired", "expired without a date")
+check(status(InviteAccess(region: "singapore", durationDays: 60, expired: false)) == InviteStatus(text: "Starts on activation", tone: .neutral),
+      "duration set, not activated yet -> Starts on activation")
+check(status(InviteAccess(durationDays: 90, effectiveExpiresAt: "2026-10-28T01:00:00.000Z", daysLeft: 6, expired: false))
+      == InviteStatus(text: "Expires 28 Oct 2026 \u{00B7} 6 days left", tone: .warning), "6 days left is flagged")
+check(status(InviteAccess(effectiveExpiresAt: "2026-12-30T01:00:00.000Z", daysLeft: 69, expired: false))?.tone == .neutral, "69 days left is calm")
+check(status(InviteAccess(region: "tokyo", expired: false)) == nil, "no limit -> no line")
+check(status(nil) == nil, "no access info -> no line")
+check(status(InviteAccess(effectiveExpiresAt: "2026-10-28T01:00:00.000Z", expired: false))?.text == "Expires 28 Oct 2026", "no daysLeft -> date only")
+check(status(InviteAccess(effectiveExpiresAt: "2026-10-28T01:00:00.000Z", daysLeft: 1, expired: false))?.text == "Expires 28 Oct 2026 \u{00B7} 1 day left", "1 day left")
+
+// MARK: 20. choices and update payload
+
+section("20. access choice + update/create payloads (only changed fields)")
+
+check(AccessChoice(durationDays: nil) == AccessChoice(preset: .noLimit) && AccessChoice(durationDays: nil).durationDays == nil, "no limit")
+check([7, 30, 90, 180, 365].map { AccessChoice(durationDays: $0).preset } == [.d7, .d30, .d90, .d180, .d365], "preset durations map to presets")
+check(AccessChoice(durationDays: 45).preset == .custom && AccessChoice(durationDays: 45).durationDays == 45, "other durations are Custom")
+check(AccessChoice(durationDays: 99999).durationDays == 3650 && AccessChoice(durationDays: 0).durationDays == 1, "Custom is clamped to 1...3650")
+check(AccessChoice(preset: .custom, customDays: 0).durationDays == 1 && AccessChoice(preset: .custom, customDays: 5000).durationDays == 3650, "typed days are clamped")
+var typed = AccessChoice(preset: .custom, customDays: 45)
+typed.customDays = -3
+check(typed.durationDays == 1, "days typed later are clamped too")
+check(AccessChoice(preset: .d30).durationDays == 30 && AccessChoice(preset: .noLimit).summary == "No limit" && AccessChoice(preset: .d90).summary == "90 days", "summary")
+check(AccessPreset.allCases.map(\.label) == ["No limit", "7 days", "30 days", "90 days", "180 days", "365 days", "Custom"], "the menu offers exactly these choices")
+
+let originalInvite = try! JSONDecoder().decode(OwnerInvite.self, from: Data("{\(inviteBase)}".utf8))
+let accessNow = InviteAccess(region: "tokyo", durationDays: 30, activatedAt: "2026-10-01T00:00:00Z", effectiveExpiresAt: "2026-10-31T00:00:00Z", daysLeft: 9, expired: false)
+func edit(region: String? = "tokyo", access: AccessChoice? = AccessChoice(durationDays: 30)) -> InviteEdit {
+    InviteEdit(code: "RF-A", label: "Alice", maxDevices: 3, monthlyQuotaGB: 200, enabled: true, region: region, access: access)
+}
+let baseKeys: Set<String> = ["code", "newCode", "label", "maxDevices", "monthlyQuotaGB", "enabled"]
+check(Set(InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit()).keys) == baseKeys, "nothing changed -> neither region nor durationDays is sent")
+let regionOnly = InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(region: "singapore"))
+check(Set(regionOnly.keys) == baseKeys.union(["region"]) && regionOnly["region"] == .string("singapore"), "region changed -> only region is added")
+let durationOnly = InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(access: AccessChoice(durationDays: 90)))
+check(Set(durationOnly.keys) == baseKeys.union(["durationDays"]) && durationOnly["durationDays"] == .int(90), "duration changed -> only durationDays is added")
+let cleared = InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(access: AccessChoice(preset: .noLimit)))
+check(cleared["durationDays"] == JSONValue.null && cleared["region"] == nil, "No limit clears the duration with an explicit null")
+let both2 = InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(region: "singapore", access: AccessChoice(preset: .custom, customDays: 45)))
+check(both2["region"] == .string("singapore") && both2["durationDays"] == .int(45), "both changed -> both sent")
+check(Set(InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(region: "TOKYO")).keys) == baseKeys, "region compared case-insensitively")
+check(Set(InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(region: nil, access: nil)).keys) == baseKeys, "controls hidden (owner invite, Apple Review) -> nothing extra")
+check(Set(InviteBody.update(original: originalInvite, originalAccess: accessNow, edit: edit(region: "singapore", access: nil)).keys) == baseKeys.union(["region"]),
+      "Apple Review: region only, never durationDays")
+check(Set(InviteBody.update(original: originalInvite, originalAccess: nil, edit: edit(region: "singapore", access: AccessChoice(durationDays: 90))).keys) == baseKeys,
+      "older backend (no access info): the new fields are never sent")
+let neverLimited = InviteAccess(region: "tokyo", expired: false)
+check(Set(InviteBody.update(original: originalInvite, originalAccess: neverLimited, edit: edit(access: AccessChoice(preset: .noLimit))).keys) == baseKeys,
+      "no limit before and after -> nothing sent")
+if let json = try? JSONEncoder().encode(cleared),
+   let object = try? JSONSerialization.jsonObject(with: json) as? [String: Any] {
+    check(object["durationDays"] is NSNull && object["code"] as? String == "RF-A" && object["enabled"] as? Bool == true,
+          "the null really is JSON null on the wire")
+} else { check(false, "update body did not encode") }
+let created = InviteBody.create(code: "RF-NEW", label: nil, maxDevices: 1, monthlyQuotaGB: 200, region: "tokyo", access: AccessChoice(preset: .noLimit))
+check(Set(created.keys) == ["code", "maxDevices", "monthlyQuotaGB"], "create: Tokyo + no limit + no label sends only the base fields")
+let createdSg = InviteBody.create(code: "RF-NEW", label: "Zed", maxDevices: 2, monthlyQuotaGB: 100, region: "singapore", access: AccessChoice(durationDays: 30))
+check(createdSg["region"] == .string("singapore") && createdSg["durationDays"] == .int(30) && createdSg["label"] == .string("Zed"), "create: Singapore + 30 days")
+check(InviteBody.create(code: "C", label: nil, maxDevices: 1, monthlyQuotaGB: 1, region: nil, access: nil).keys.contains("region") == false, "create: controls hidden -> nothing extra")
+check(InviteRegionOptions.options(ownerRegions: [.tokyo], current: nil).map(\.id) == ["tokyo"], "owner without Singapore: only Tokyo can be assigned")
+check(InviteRegionOptions.options(ownerRegions: both, current: nil).map(\.id) == ["tokyo", "singapore"], "owner with Singapore: both")
+check(InviteRegionOptions.options(ownerRegions: [.tokyo], current: "singapore").map(\.id) == ["tokyo", "singapore"], "an invite already on Singapore still shows it")
+check(InviteRegionOptions.options(ownerRegions: both, current: "SINGAPORE").map(\.id) == ["tokyo", "singapore"], "current region matched case-insensitively")
+
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))
 exit(failures == 0 ? 0 : 1)

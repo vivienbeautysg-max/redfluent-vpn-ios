@@ -65,22 +65,50 @@ enum SharedContainer {
         containerURL?.appendingPathComponent(startErrorFileName)
     }
 
-    /// {"message": ..., "at": epoch seconds} — the format TunnelStartError (app target) reads.
-    static func encodeStartError(message: String, at: Date) -> Data? {
+    /// {"message": ..., "at": epoch seconds, "kind": ...} — the format TunnelStartError (app target) reads.
+    /// kind "start" is a failed start; "expired" / "revoked" is the server ending this device's access.
+    static func encodeStartError(message: String, at: Date, kind: String = "start") -> Data? {
         try? JSONSerialization.data(withJSONObject: [
             "message": String(message.prefix(500)),
             "at": at.timeIntervalSince1970,
+            "kind": kind,
         ] as [String: Any])
+    }
+
+    /// The server-side stop a stored record carries, nil for a plain start failure or garbage.
+    static func stopKind(in data: Data?) -> StopKind? {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let kind = object["kind"] as? String else { return nil }
+        return StopKind(rawValue: kind)
     }
 
     /// Why this start failed, written just before the extension throws. Best effort like the stats file:
     /// the app then falls back to the error iOS recorded.
     static func writeStartError(_ message: String) {
-        guard let url = startErrorURL, let data = encodeStartError(message: message, at: Date()) else { return }
-        try? data.write(to: url, options: [.atomic])
+        write(encodeStartError(message: message, at: Date()))
     }
 
+    /// The server ended this device's access (expired / revoked). While this record stands, starts the app
+    /// did not ask for (on-demand, Settings) are refused; the app clears it once its profile says it is fine.
+    static func writeStopReason(_ kind: StopKind) {
+        write(encodeStartError(message: kind.message, at: Date(), kind: kind.rawValue))
+    }
+
+    /// The stop record currently stored, if any.
+    static func readStopReason() -> StopKind? {
+        guard let url = startErrorURL else { return nil }
+        return stopKind(in: try? Data(contentsOf: url))
+    }
+
+    /// Clear the record of an earlier failed start. A stop record is the lock described above and stays.
     static func clearStartError() {
-        if let url = startErrorURL { try? FileManager.default.removeItem(at: url) }
+        guard let url = startErrorURL, readStopReason() == nil else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func write(_ data: Data?) {
+        guard let url = startErrorURL, let data else { return }
+        try? data.write(to: url, options: [.atomic])
     }
 }

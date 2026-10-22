@@ -14,6 +14,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private lazy var platformInterface = RedFluentPlatformInterface(provider: self)
     var networkSettings: NEPacketTunnelNetworkSettings?
     private var statsPoller: ClashStatsPoller?
+    // Region follow (see startFollowing)
+    private let followLock = NSLock()
+    private var followTask: Task<Void, Never>?
+    private var pathDebounceTask: Task<Void, Never>?
+    private var pathMonitor: NWPathMonitor?
+    private var lastPath: FollowPolicy.PathSignature?
+    private var lastFollowCheckAt = Date.distantPast
+    /// The region the running engine was configured for.
+    private var activeRegionID = RuntimeConfigRequest.defaultRegion
     #endif
 
     // Clash API endpoint injected into the sing-box config at boot.
@@ -29,6 +38,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called")
         SharedContainer.clearActiveRegion()
+        // The server ended this device's access (expired / revoked) and the app has not cleared that yet:
+        // refuse starts nobody asked for (on-demand, Settings) without even fetching.
+        if let stop = SharedContainer.readStopReason() {
+            throw NSError(domain: "rfv.tunnel", code: stop == .expired ? 403 : 401,
+                          userInfo: [NSLocalizedDescriptionKey: stop.message])
+        }
         SharedContainer.clearStartError()
 
         do {
@@ -48,6 +63,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("stopTunnel reason=\(reason.rawValue)")
         SharedContainer.clearActiveRegion()
         #if HAS_LIBBOX
+        await stopFollowing()
         if let poller = statsPoller {
             await poller.stop()
         }
@@ -140,19 +156,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         Task {
             await poller.start(bootedAt: bootedAt, secret: secret)
         }
+
+        // 8. Follow the server's region assignment / expiry while connected.
+        startFollowing()
     }
 
     private func loadConfig() async throws -> String {
         // Prefer a per-device config from the backend (carries this device's own
         // uuid, so revoking it server-side actually cuts the tunnel). Fall back
         // to the bundled shared config on ANY failure so the tunnel still comes up.
-        // Exception: a non-default region never falls back. The bundled config is Tokyo,
-        // and connecting there while the app says Singapore would be a lie.
+        // Exceptions: an expired invite never connects, and a non-default region never falls back
+        // (the bundled config is Tokyo; connecting there while the app says Singapore would be a lie).
         let region = requestedRegion
-        let fetched = await fetchPerDeviceConfigData(region: region)
+        let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         if let perDevice = fetched.data {
-            SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
+            let active = fetched.echoedRegion ?? region
+            activeRegionID = active
+            SharedContainer.writeActiveRegion(id: active, name: fetched.serverRegion ?? active.capitalized)
             return try injectClashAPI(into: perDevice)
+        }
+        if FollowPolicy.blocksStart(fetched.outcome) {
+            throw NSError(domain: "rfv.tunnel", code: 403,
+                          userInfo: [NSLocalizedDescriptionKey: StopKind.expired.message])
         }
         guard RuntimeConfigRequest.isDefault(region: region) else {
             throw NSError(domain: "rfv.tunnel", code: 210,
@@ -165,7 +190,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             throw NSError(domain: "rfv.tunnel", code: 200,
                           userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
         }
-        SharedContainer.writeActiveRegion(id: region, name: "Tokyo")
+        activeRegionID = RuntimeConfigRequest.defaultRegion
+        SharedContainer.writeActiveRegion(id: activeRegionID, name: "Tokyo")
         return try injectClashAPI(into: data)
     }
 
@@ -178,21 +204,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return region
     }
 
+    /// Everyone but the owner: the app says "server" and the request carries no region parameter, so the
+    /// server decides which region this account gets. A configuration saved by an older app has no mode
+    /// and keeps sending the region explicitly.
+    private var serverDecidesRegion: Bool {
+        let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        return (cfg?["regionMode"] as? String) == "server"
+    }
+
     private struct RuntimeConfigFetch {
         var data: Data?
         var serverRegion: String?
+        /// The region the server says it answered with.
+        var echoedRegion: String?
+        var outcome: RuntimeConfigOutcome
         var failure: String?
     }
 
-    /// Fetch this device's sing-box config for `region` from the backend, using the token the
-    /// app passed via providerConfiguration. On any failure `data` is nil and `failure` says why,
-    /// so the caller can fall back to the bundled config (default region only).
-    private func fetchPerDeviceConfigData(region: String) async -> RuntimeConfigFetch {
+    /// Fetch this device's sing-box config from the backend, using the token the app passed via
+    /// providerConfiguration. On any failure `data` is nil and `outcome` / `failure` say why, so the caller
+    /// can fall back to the bundled config (default region only) or react to expiry.
+    private func fetchPerDeviceConfigData(region: String, serverDecides: Bool) async -> RuntimeConfigFetch {
         let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
         guard let token = cfg?["token"] as? String,
               let base = cfg?["apiBase"] as? String,
-              let url = RuntimeConfigRequest.url(base: base, region: region) else {
-            return RuntimeConfigFetch(failure: "device not activated")
+              let url = RuntimeConfigRequest.url(
+                base: base,
+                region: RuntimeConfigRequest.regionParameter(region: region, serverDecides: serverDecides)) else {
+            return RuntimeConfigFetch(outcome: .network, failure: "device not activated")
         }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -200,29 +239,142 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
-                return RuntimeConfigFetch(failure: "no HTTP response")
+                return RuntimeConfigFetch(outcome: .network, failure: "no HTTP response")
             }
             guard (200..<300).contains(http.statusCode) else {
                 let reason = RuntimeConfigRequest.serverReason(from: data)
-                return RuntimeConfigFetch(failure: "HTTP \(http.statusCode)" + (reason.map { ": \($0)" } ?? ""))
+                return RuntimeConfigFetch(outcome: .http(status: http.statusCode, error: reason),
+                                          failure: "HTTP \(http.statusCode)" + (reason.map { ": \($0)" } ?? ""))
             }
             guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   obj["ok"] as? Bool == true,
                   let rc = obj["runtimeConfig"] else {
-                return RuntimeConfigFetch(failure: "unexpected response")
+                return RuntimeConfigFetch(outcome: .http(status: http.statusCode, error: nil), failure: "unexpected response")
             }
-            // A backend that predates regions ignores ?region= and answers with the Tokyo config.
-            if !RuntimeConfigRequest.isDefault(region: region),
+            // A region asked for by name must be confirmed: a backend that predates regions ignores
+            // ?region= and answers with the Tokyo config.
+            if !serverDecides, !RuntimeConfigRequest.isDefault(region: region),
                !RuntimeConfigRequest.confirms(region: region, in: obj) {
-                return RuntimeConfigFetch(failure: "server did not confirm the region")
+                return RuntimeConfigFetch(outcome: .http(status: http.statusCode, error: "region not confirmed"),
+                                          failure: "server did not confirm the region")
             }
             logger.info("using per-device config from backend")
+            let echoed = obj["region"] as? String
             return RuntimeConfigFetch(data: try JSONSerialization.data(withJSONObject: rc),
-                                      serverRegion: obj["serverRegion"] as? String)
+                                      serverRegion: obj["serverRegion"] as? String,
+                                      echoedRegion: echoed,
+                                      outcome: .config(region: echoed))
         } catch {
             logger.warning("per-device config fetch failed: \(error.localizedDescription, privacy: .public)")
-            return RuntimeConfigFetch(failure: error.localizedDescription)
+            return RuntimeConfigFetch(outcome: .network, failure: error.localizedDescription)
         }
+    }
+
+    // MARK: - Region follow
+
+    /// While connected: one timer (every 5 minutes) plus a debounced network-change check. Both only sleep
+    /// or wait for events, so nothing runs between checks.
+    private func startFollowing() {
+        let timer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(FollowPolicy.interval * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                await self.followCheck(reason: "timer")
+            }
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in self?.followPathChanged(path) }
+        monitor.start(queue: DispatchQueue(label: "com.redfluent.vpn.tunnel.follow-path"))
+        followLock.lock()
+        followTask = timer
+        pathMonitor = monitor
+        followLock.unlock()
+    }
+
+    private func followPathChanged(_ path: Network.NWPath) {
+        let current = FollowPolicy.PathSignature(
+            satisfied: path.status == .satisfied,
+            interfaces: path.availableInterfaces.map(\.name).sorted())
+        followLock.lock()
+        defer { followLock.unlock() }
+        let previous = lastPath
+        lastPath = current
+        guard FollowPolicy.pathChangeWarrantsCheck(previous: previous, current: current) else { return }
+        pathDebounceTask?.cancel()
+        pathDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(FollowPolicy.pathDebounce * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await self.followCheck(reason: "network change")
+        }
+    }
+
+    /// Ends the follower, and waits for a check or engine reload still in flight so the engine is never
+    /// closed underneath it.
+    private func stopFollowing() async {
+        let (tasks, monitor): ([Task<Void, Never>], NWPathMonitor?) = followLock.withLock {
+            let tasks = [followTask, pathDebounceTask].compactMap { $0 }
+            let monitor = pathMonitor
+            followTask = nil
+            pathDebounceTask = nil
+            pathMonitor = nil
+            lastPath = nil
+            return (tasks, monitor)
+        }
+        monitor?.cancel()
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
+    }
+
+    private func followCheck(reason: String) async {
+        let tooSoon: Bool = followLock.withLock {
+            let now = Date()
+            let soon = now.timeIntervalSince(lastFollowCheckAt) < FollowPolicy.minGap
+            if !soon { lastFollowCheckAt = now }
+            return soon
+        }
+        guard !tooSoon, commandServer != nil else { return }
+
+        let fetched = await fetchPerDeviceConfigData(region: requestedRegion, serverDecides: serverDecidesRegion)
+        guard !Task.isCancelled, commandServer != nil else { return }
+        switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome) {
+        case .keep:
+            logger.info("region follow (\(reason, privacy: .public)): kept; \(fetched.failure ?? "no change", privacy: .public)")
+        case .reload(let region):
+            reloadEngine(fetched, region: region)
+        case .stop(let kind):
+            stopForServer(kind)
+        }
+    }
+
+    /// The server now assigns another region: restart the sing-box service with the new config. The tunnel
+    /// itself stays up (same path the official client takes to reload a profile).
+    private func reloadEngine(_ fetched: RuntimeConfigFetch, region: String) {
+        guard let data = fetched.data, let server = commandServer else { return }
+        do {
+            let content = try injectClashAPI(into: data)
+            reasserting = true
+            defer { reasserting = false }
+            try server.startOrReloadService(content, options: LibboxOverrideOptions())
+            activeRegionID = region
+            SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
+            logger.info("region follow: engine reloaded for \(region, privacy: .public)")
+        } catch {
+            // The old engine is gone and the new one did not start: stop visibly instead of limping.
+            let message = "Could not switch region: \(error.localizedDescription)"
+            logger.error("\(message, privacy: .public)")
+            SharedContainer.writeStartError(message)
+            cancelTunnelWithError(NSError(domain: "rfv.tunnel", code: 220,
+                                          userInfo: [NSLocalizedDescriptionKey: message]))
+        }
+    }
+
+    /// Expired / revoked: leave the reason for the app (which asks /profile and shows Expired / Revoked)
+    /// and stop the tunnel.
+    private func stopForServer(_ kind: StopKind) {
+        logger.warning("region follow: server says \(kind.rawValue, privacy: .public); stopping the tunnel")
+        SharedContainer.writeStopReason(kind)
+        cancelTunnelWithError(NSError(domain: "rfv.tunnel", code: kind == .expired ? 403 : 401,
+                                      userInfo: [NSLocalizedDescriptionKey: kind.message]))
     }
 
     /// Parse the bundled config JSON, ensure `experimental.clash_api` exists

@@ -4,6 +4,8 @@ import UIKit
 @MainActor
 final class OwnerAdminViewModel: ObservableObject {
     @Published var invites: [OwnerInvite] = []
+    /// Region / access duration / expiry per invite code (1.2 backends); empty on an older one.
+    @Published var inviteAccess: [String: InviteAccess] = [:]
     @Published var devices: [OwnerDevice] = []
     /// Current-period usage by profileId; empty when the backend has no usage data.
     @Published var usage: [String: DeviceUsage] = [:]
@@ -18,8 +20,9 @@ final class OwnerAdminViewModel: ObservableObject {
         #if DEBUG
         if ScreenshotMode.isOn {
             invites = ScreenshotMode.ownerInvites
+            inviteAccess = ScreenshotMode.ownerInviteAccess
             devices = ScreenshotMode.ownerDevices
-            usage = ScreenshotMode.ownerUsage
+            usage = ScreenshotMode.hidesUsage ? [:] : ScreenshotMode.ownerUsage
             usagePeriod = ScreenshotMode.ownerPeriod
             return
         }
@@ -30,7 +33,9 @@ final class OwnerAdminViewModel: ObservableObject {
             async let inviteList = api.fetchOwnerInvites(token: token)
             async let deviceList = api.fetchOwnerDevices(token: token)
             async let activationList = api.fetchOwnerActivationEvents(token: token)
-            invites = try await inviteList
+            let ownerInvites = try await inviteList
+            invites = ownerInvites.invites
+            inviteAccess = ownerInvites.access
             let ownerDevices = try await deviceList
             devices = ownerDevices.devices
             usage = ownerDevices.usage
@@ -42,25 +47,25 @@ final class OwnerAdminViewModel: ObservableObject {
         isLoading = false
     }
 
-    func updateInvite(_ invite: OwnerInvite, newCode: String, label: String, maxDevices: Int, monthlyQuotaGB: Int, enabled: Bool, token: String) async -> Bool {
+    /// Saves an invite change. nil on success, otherwise the server's reason (shown inside the sheet).
+    func updateInvite(_ body: [String: JSONValue], token: String) async -> String? {
         do {
-            let updated = try await api.updateOwnerInvite(
-                invite,
-                newCode: newCode,
-                label: label,
-                maxDevices: maxDevices,
-                monthlyQuotaGB: monthlyQuotaGB,
-                enabled: enabled,
-                token: token
-            )
-            if let idx = invites.firstIndex(where: { $0.code == invite.code || $0.code == updated.code }) {
-                invites[idx] = updated
-            }
+            _ = try await api.updateOwnerInvite(body: body, token: token)
+        } catch {
+            return error.localizedDescription
+        }
+        await refreshInvites(token: token)
+        return nil
+    }
+
+    private func refreshInvites(token: String) async {
+        do {
+            let result = try await api.fetchOwnerInvites(token: token)
+            invites = result.invites
+            inviteAccess = result.access
             errorMessage = nil
-            return true
         } catch {
             errorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -165,7 +170,9 @@ struct OwnerAdminView: View {
                         Button {
                             inviteToEdit = invite
                         } label: {
-                            OwnerInviteRow(invite: invite)
+                            OwnerInviteRow(invite: invite,
+                                           access: model.inviteAccess[invite.code],
+                                           isOwnerInvite: isOwnerInvite(invite))
                         }
                         .buttonStyle(.plain)
                     }
@@ -222,15 +229,17 @@ struct OwnerAdminView: View {
                     .environmentObject(appState)
             }
             .sheet(item: $inviteToEdit) { invite in
-                EditInviteView(invite: invite) { newCode, label, maxDevices, monthlyQuotaGB, enabled in
-                    guard let token = appState.currentProfile?.token else { return false }
+                let access = model.inviteAccess[invite.code]
+                EditInviteView(
+                    invite: invite,
+                    access: access,
+                    isOwnerInvite: isOwnerInvite(invite),
+                    isReviewInvite: isReviewInvite(invite),
+                    regionOptions: InviteRegionOptions.options(ownerRegions: appState.regions, current: access?.region)
+                ) { edit in
+                    guard let token = appState.currentProfile?.token else { return "Not signed in" }
                     return await model.updateInvite(
-                        invite,
-                        newCode: newCode,
-                        label: label,
-                        maxDevices: maxDevices,
-                        monthlyQuotaGB: monthlyQuotaGB,
-                        enabled: enabled,
+                        InviteBody.update(original: invite, originalAccess: access, edit: edit),
                         token: token
                     )
                 } onDelete: {
@@ -238,6 +247,7 @@ struct OwnerAdminView: View {
                     return await model.deleteInvite(invite, token: token)
                 }
             }
+
             .sheet(item: $deviceToRename) { device in
                 ManageDeviceView(device: device) { name in
                     guard let token = appState.currentProfile?.token else { return }
@@ -247,8 +257,28 @@ struct OwnerAdminView: View {
                     return await model.revokeDevice(device, token: token)
                 }
             }
-            .task { await refresh() }
+            .task {
+                await refresh()
+                #if DEBUG
+                if let n = ScreenshotMode.editInviteIndex, model.invites.indices.contains(n - 1) {
+                    inviteToEdit = model.invites[n - 1]
+                }
+                #endif
+            }
         }
+    }
+
+    /// The owner's own invite: its devices include this one. (The old fixed owner code was rotated away.)
+    private var ownerInviteCode: String? {
+        model.devices.first(where: { $0.profileId == appState.currentProfile?.profileId })?.inviteCode
+    }
+
+    private func isOwnerInvite(_ invite: OwnerInvite) -> Bool {
+        invite.code == ownerInviteCode || invite.code == "RF-OWNER-2026"
+    }
+
+    private func isReviewInvite(_ invite: OwnerInvite) -> Bool {
+        invite.label.trimmingCharacters(in: .whitespaces).lowercased() == "apple review"
     }
 
     private var usageGroups: [UsageGroup] {
@@ -353,6 +383,8 @@ private struct OwnerActivationEventRow: View {
 
 private struct OwnerInviteRow: View {
     let invite: OwnerInvite
+    let access: InviteAccess?
+    let isOwnerInvite: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
@@ -375,12 +407,27 @@ private struct OwnerInviteRow: View {
             HStack(spacing: Theme.Spacing.md) {
                 metric("Devices", "\(invite.activeDevices)/\(invite.maxDevices)")
                 metric("Monthly", invite.monthlyQuotaGB.map { "\($0) GB" } ?? "Unlimited")
-                metric("Expires", invite.expiresAt ?? "Never")
+                if let region = regionName {
+                    metric("Region", region)
+                } else {
+                    metric("Expires", invite.expiresAt ?? "Never")
+                }
             }
             .font(Theme.Font.caption)
             .foregroundStyle(Theme.Color.textSecondary)
+            if !isOwnerInvite, let status = InviteStatusLine.status(access) {
+                Text(status.text)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(status.tone.color)
+            }
         }
         .padding(.vertical, Theme.Spacing.xs)
+    }
+
+    /// Shown only where the backend reports regions, and not for the owner invite (it uses all of them).
+    private var regionName: String? {
+        guard !isOwnerInvite, access?.isPresent == true, let region = access?.region else { return nil }
+        return region.capitalized
     }
 
     private func metric(_ label: String, _ value: String) -> some View {
@@ -558,7 +605,11 @@ private func displayServerTime(_ raw: String) -> String {
 
 private struct EditInviteView: View {
     let invite: OwnerInvite
-    let onSave: (String, String, Int, Int, Bool) async -> Bool
+    let access: InviteAccess?
+    let isOwnerInvite: Bool
+    let isReviewInvite: Bool
+    let regionOptions: [VPNRegion]
+    let onSave: (InviteEdit) async -> String?
     let onDelete: () async -> Bool
 
     @Environment(\.dismiss) private var dismiss
@@ -567,16 +618,27 @@ private struct EditInviteView: View {
     @State private var maxDevices: Int
     @State private var monthlyQuotaGB: Int
     @State private var enabled: Bool
+    @State private var region: String
+    @State private var accessChoice: AccessChoice
     @State private var isSaving = false
     @State private var isDeleting = false
     @State private var showingDeleteConfirm = false
+    @State private var saveError: String?
 
     init(
         invite: OwnerInvite,
-        onSave: @escaping (String, String, Int, Int, Bool) async -> Bool,
+        access: InviteAccess?,
+        isOwnerInvite: Bool,
+        isReviewInvite: Bool,
+        regionOptions: [VPNRegion],
+        onSave: @escaping (InviteEdit) async -> String?,
         onDelete: @escaping () async -> Bool
     ) {
         self.invite = invite
+        self.access = access
+        self.isOwnerInvite = isOwnerInvite
+        self.isReviewInvite = isReviewInvite
+        self.regionOptions = regionOptions
         self.onSave = onSave
         self.onDelete = onDelete
         _code = State(initialValue: invite.code)
@@ -584,7 +646,14 @@ private struct EditInviteView: View {
         _maxDevices = State(initialValue: invite.maxDevices)
         _monthlyQuotaGB = State(initialValue: invite.monthlyQuotaGB ?? 200)
         _enabled = State(initialValue: invite.enabled)
+        let current = access?.region ?? RegionPolicy.defaultID
+        _region = State(initialValue: regionOptions.first(where: { RegionPolicy.matches($0.id, current) })?.id ?? current)
+        _accessChoice = State(initialValue: AccessChoice(durationDays: access?.durationDays))
     }
+
+    /// Region and Access only where the backend reports them, never for the owner invite; the Apple Review
+    /// invite takes a region but no duration (the server refuses one).
+    private var showsAccessControls: Bool { access?.isPresent == true && !isOwnerInvite }
 
     var body: some View {
         NavigationStack {
@@ -593,13 +662,24 @@ private struct EditInviteView: View {
                     TextField("Code", text: $code)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .disabled(isOwnerRootInvite)
+                        .disabled(isOwnerInvite)
                     TextField("Label", text: $label)
                     Stepper("Device limit: \(maxDevices)", value: $maxDevices, in: 1...100)
                     Stepper("Monthly limit: \(monthlyQuotaGB) GB", value: $monthlyQuotaGB, in: 1...2000, step: 50)
                     Toggle("Enabled", isOn: $enabled)
                 }
-                if isOwnerRootInvite {
+                if showsAccessControls {
+                    Section {
+                        InviteAccessRows(
+                            region: $region,
+                            access: $accessChoice,
+                            regionOptions: regionOptions,
+                            showsAccess: !isReviewInvite,
+                            status: isReviewInvite ? nil : InviteStatusLine.status(access)
+                        )
+                    }
+                }
+                if isOwnerInvite {
                     Section {
                         Text("The owner invite is protected and cannot be renamed or deleted.")
                             .font(Theme.Font.caption)
@@ -617,6 +697,13 @@ private struct EditInviteView: View {
                             }
                         }
                         .disabled(isDeleting || isSaving)
+                    }
+                }
+                if let saveError {
+                    Section {
+                        Text(saveError)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Color.danger)
                     }
                 }
             }
@@ -644,18 +731,7 @@ private struct EditInviteView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
-                        isSaving = true
-                        Task {
-                            let ok = await onSave(
-                                code.trimmingCharacters(in: .whitespacesAndNewlines),
-                                label.trimmingCharacters(in: .whitespacesAndNewlines),
-                                maxDevices,
-                                monthlyQuotaGB,
-                                enabled
-                            )
-                            isSaving = false
-                            if ok { dismiss() }
-                        }
+                        save()
                     } label: {
                         if isSaving { ProgressView() } else { Text("Save") }
                     }
@@ -665,12 +741,27 @@ private struct EditInviteView: View {
         }
     }
 
-    private var trimmedCode: String {
-        code.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func save() {
+        isSaving = true
+        saveError = nil
+        let edit = InviteEdit(
+            code: trimmedCode,
+            label: label.trimmingCharacters(in: .whitespacesAndNewlines),
+            maxDevices: maxDevices,
+            monthlyQuotaGB: monthlyQuotaGB,
+            enabled: enabled,
+            region: showsAccessControls ? region : nil,
+            access: showsAccessControls && !isReviewInvite ? accessChoice : nil
+        )
+        Task {
+            let error = await onSave(edit)
+            isSaving = false
+            if let error { saveError = error } else { dismiss() }
+        }
     }
 
-    private var isOwnerRootInvite: Bool {
-        invite.code == "RF-OWNER-2026"
+    private var trimmedCode: String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
