@@ -7,6 +7,8 @@ enum SharedContainer {
     static let statsFileName = "stats.json"
     /// Must stay identical to RegionStore.activeKey in the app target.
     static let activeRegionKey = "rfv.region.active"
+    /// Must stay identical to TunnelStartError.fileName in the app target.
+    static let startErrorFileName = "start-error.json"
 
     static var containerURL: URL? {
         FileManager.default
@@ -57,5 +59,28 @@ enum SharedContainer {
 
     static func clearActiveRegion() {
         UserDefaults(suiteName: appGroupID)?.removeObject(forKey: activeRegionKey)
+    }
+
+    static var startErrorURL: URL? {
+        containerURL?.appendingPathComponent(startErrorFileName)
+    }
+
+    /// {"message": ..., "at": epoch seconds} — the format TunnelStartError (app target) reads.
+    static func encodeStartError(message: String, at: Date) -> Data? {
+        try? JSONSerialization.data(withJSONObject: [
+            "message": String(message.prefix(500)),
+            "at": at.timeIntervalSince1970,
+        ] as [String: Any])
+    }
+
+    /// Why this start failed, written just before the extension throws. Best effort like the stats file:
+    /// the app then falls back to the error iOS recorded.
+    static func writeStartError(_ message: String) {
+        guard let url = startErrorURL, let data = encodeStartError(message: message, at: Date()) else { return }
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    static func clearStartError() {
+        if let url = startErrorURL { try? FileManager.default.removeItem(at: url) }
     }
 }

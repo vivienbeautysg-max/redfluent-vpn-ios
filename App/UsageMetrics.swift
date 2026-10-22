@@ -71,8 +71,8 @@ struct UsageRow: Equatable, Identifiable {
 
     var level: UsageLevel { UsageLevel(percent: percent ?? 0) }
 
-    /// Bar fill, clamped to 0...1 (usage can exceed the quota).
-    var fraction: Double? { percent.map { min(max($0 / 100, 0), 1) } }
+    /// Bar fill, clamped to 0...1 (usage can exceed the quota). Never NaN or infinite: it becomes a width.
+    var fraction: Double? { percent.map { $0.isFinite ? min(max($0 / 100, 0), 1) : 0 } }
 
     var amountText: String { UsageFormat.amount(used: usedGB, quota: quotaGB) }
     var percentText: String? { percent.map(UsageFormat.percent) }
@@ -111,9 +111,14 @@ enum UsageMetrics {
     static func groups(devices: [OwnerDevice], usage: [String: DeviceUsage]) -> [UsageGroup] {
         var byLabel: [String: [UsageRow]] = [:]
         for device in devices {
-            guard let u = usage[device.profileId], let used = u.usedGB else { continue }
-            let quota = (u.quotaGB ?? 0) > 0 ? u.quotaGB : nil
-            let percent: Double? = quota.map { u.percent ?? used / $0 * 100 }
+            // A usage figure that is not a finite number is unusable; a negative one counts as 0.
+            guard let u = usage[device.profileId], let reported = u.usedGB, reported.isFinite else { continue }
+            let used = max(reported, 0)
+            let quota: Double? = u.quotaGB.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+            let percent: Double? = quota.flatMap { quota in
+                let value = u.percent.flatMap { $0.isFinite ? $0 : nil } ?? used / quota * 100
+                return value.isFinite ? max(value, 0) : nil
+            }
             let detail = [device.deviceName, device.appVersion]
                 .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }

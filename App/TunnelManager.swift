@@ -10,6 +10,7 @@ final class TunnelManager: ObservableObject {
     private let tunnelDescription = "RedFluent VPN"
     private var statusObserver: NSObjectProtocol?
     private var isRestarting = false
+    private var attempts = StartAttemptTracker()
 
     init() {
         statusObserver = NotificationCenter.default.addObserver(
@@ -20,13 +21,20 @@ final class TunnelManager: ObservableObject {
             guard let self else { return }
             if let conn = note.object as? NEVPNConnection {
                 Task { @MainActor in
-                    let previous = self.status
                     let next = TunnelStatus(neStatus: conn.status)
                     self.status = next
-                    // A start attempt that drops straight back to "disconnected" may have been
-                    // refused by the extension (e.g. its region config could not be loaded).
-                    if next == .disconnected, previous == .connecting {
-                        self.reportStartFailure(conn)
+                    switch next {
+                    case .connected:
+                        self.attempts.reachedConnected()
+                    case .disconnected:
+                        // Only an attempt this app began and that never connected can be a start
+                        // failure; connected -> reasserting -> disconnected (network change,
+                        // on-demand) and starts iOS triggers itself stay a plain "Disconnected".
+                        if let attempt = self.attempts.attemptForDisconnect() {
+                            self.reportStartFailure(conn, attempt: attempt)
+                        }
+                    default:
+                        break
                     }
                 }
             }
@@ -64,12 +72,18 @@ final class TunnelManager: ObservableObject {
 
     func connect() async {
         status = .connecting
+        // No stale errors: anything shown after this point belongs to this attempt.
+        lastError = nil
+        TunnelStartError.clear()
+        let region = RegionStore.selectedRegion()
         do {
             // onDemand: true = iOS keeps the tunnel up (auto-reconnect on drop /
             // network change) and does not leak traffic outside it (kill-switch).
-            let manager = try await loadOrCreateConfiguredManager(onDemand: true)
+            let manager = try await loadOrCreateConfiguredManager(onDemand: true, region: region)
+            attempts.begin(regionID: region.id)
             try manager.connection.startVPNTunnel()
         } catch {
+            attempts.cancel()
             lastError = error.localizedDescription
             status = .failed
         }
@@ -77,6 +91,7 @@ final class TunnelManager: ObservableObject {
 
     func disconnect() async {
         status = .disconnecting
+        attempts.cancel()
         do {
             // Clear on-demand FIRST so iOS doesn't immediately re-establish the
             // tunnel, then stop it. Without this the user can't actually turn it off.
@@ -94,6 +109,7 @@ final class TunnelManager: ObservableObject {
         isRestarting = true
         defer { isRestarting = false }
         status = .disconnecting
+        attempts.cancel()
         do {
             // Same order as disconnect(): clear on-demand first so iOS does not bring the old
             // region back by itself, then stop and wait until the tunnel is really down.
@@ -112,14 +128,85 @@ final class TunnelManager: ObservableObject {
         await connect()
     }
 
-    /// Show why a start attempt ended: the extension's own error (not a silent drop to "Disconnected").
-    private func reportStartFailure(_ connection: NEVPNConnection) {
-        connection.fetchLastDisconnectError { [weak self] error in
-            guard let error else { return }
-            Task { @MainActor in
-                self?.lastError = error.localizedDescription
-                self?.status = .failed
+    /// The region selection changed (picker, or a reset after a /profile refresh). Connected: reconnect so
+    /// it takes effect. Otherwise keep the saved tunnel configuration in step, so a start from Settings,
+    /// Shortcuts or on-demand uses the region the picker shows.
+    func selectedRegionChanged() async {
+        // Signed out or revoked (the selection is reset then): there is no configuration to keep in step,
+        // and a reconnect would start without the device token.
+        guard ProfileStore.load() != nil else { return }
+        if status.isConnected {
+            await restart()
+        } else {
+            await syncSavedRegion()
+        }
+    }
+
+    /// Re-save region + server address of an existing saved tunnel configuration, without starting it.
+    private func syncSavedRegion() async {
+        do {
+            // Never configured yet: the first connect() writes it.
+            guard let manager = try await loadManager() else { return }
+            switch manager.connection.status {
+            case .connected, .connecting, .reasserting:
+                await restart()   // it is up after all: a save alone would not change the running region
+                return
+            default:
+                break
             }
+            guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else { return }
+            let region = RegionStore.selectedRegion()
+            let address = RegionPolicy.serverAddress(for: region)
+            let saved = proto.providerConfiguration?["region"] as? String
+            if saved == region.id, proto.serverAddress == address { return }
+            proto.serverAddress = address
+            proto.providerConfiguration = RegionPolicy.providerConfiguration(proto.providerConfiguration, region: region)
+            manager.protocolConfiguration = proto
+            try await manager.saveToPreferences()
+        } catch {
+            lastError = "Could not save the region: \(error.localizedDescription)"
+        }
+    }
+
+    /// Show why a start attempt ended. First the extension's own message (a file in the App Group, so it
+    /// does not depend on NetworkExtension status order), then whatever error iOS recorded. With neither,
+    /// it stays a plain "Disconnected".
+    private func reportStartFailure(_ connection: NEVPNConnection, attempt: StartAttempt) {
+        Task { @MainActor [self] in
+            let reason: String?
+            if let fromExtension = TunnelStartError.read(since: attempt.startedAt) {
+                reason = fromExtension
+            } else {
+                reason = await Self.lastDisconnectError(of: connection)
+            }
+            guard let reason, attempts.attempt == attempt else { return }   // nothing to say, or superseded
+            attempts.finish()
+            lastError = reason
+            status = .failed
+            if RegionPolicy.disablesOnDemandAfterFailure(regionID: attempt.regionID) {
+                await turnOffOnDemand()
+            }
+        }
+    }
+
+    private static func lastDisconnectError(of connection: NEVPNConnection) async -> String? {
+        await withCheckedContinuation { continuation in
+            connection.fetchLastDisconnectError { error in
+                continuation.resume(returning: error?.localizedDescription)
+            }
+        }
+    }
+
+    /// A non-default region that failed to start must not stay on on-demand, or iOS keeps retrying a
+    /// start that cannot work (403 / 503). Tokyo keeps today's on-demand behaviour.
+    private func turnOffOnDemand() async {
+        do {
+            guard let manager = try await loadManager(), manager.isOnDemandEnabled else { return }
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = []
+            try await manager.saveToPreferences()
+        } catch {
+            lastError = (lastError.map { $0 + " " } ?? "") + "Could not turn off auto-reconnect: \(error.localizedDescription)"
         }
     }
 
@@ -133,14 +220,16 @@ final class TunnelManager: ObservableObject {
     /// Load-or-create the tunnel manager, apply our configuration, set the
     /// on-demand (kill-switch / auto-reconnect) state, and persist. Only called
     /// from connect()/disconnect() — never from a plain status read.
-    private func loadOrCreateConfiguredManager(onDemand: Bool) async throws -> NETunnelProviderManager {
+    private func loadOrCreateConfiguredManager(
+        onDemand: Bool,
+        region: VPNRegion = RegionStore.selectedRegion()
+    ) async throws -> NETunnelProviderManager {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
         let manager = managers.first ?? NETunnelProviderManager()
 
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = providerBundleIdentifier
-        let region = RegionStore.selectedRegion()
-        proto.serverAddress = "RedFluent \(region.name)"
+        proto.serverAddress = RegionPolicy.serverAddress(for: region)
         var providerConfig: [String: Any] = ["configProfile": "review-safe-profile-v1", "region": region.id]
         // Pass the device token + API base so the tunnel extension can fetch a
         // per-device sing-box config (its own uuid) from the backend. The

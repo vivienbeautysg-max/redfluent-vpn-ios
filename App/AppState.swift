@@ -54,8 +54,10 @@ final class AppState: ObservableObject {
         activation = .activated(updated)
     }
 
-    /// Adopt the region list from /profile. A selection the server no longer offers falls back to Tokyo.
+    /// Adopt the region list from /profile. A selection the server no longer offers falls back to the
+    /// server's default region (else the first one), so the picker always has a selection.
     func applyOfferedRegions(_ offered: [VPNRegion]) {
+        let offered = RegionPolicy.offered(from: offered)
         regions = offered
         RegionStore.saveOffered(offered)
         let resolved = RegionPolicy.resolveSelection(stored: selectedRegionID, offered: offered)
@@ -66,17 +68,18 @@ final class AppState: ObservableObject {
     }
 
     func selectRegion(_ id: String) {
-        guard id != selectedRegionID, regions.contains(where: { $0.id == id }) else { return }
-        selectedRegionID = id
-        RegionStore.saveSelected(id)
+        guard let region = regions.first(where: { RegionPolicy.matches($0.id, id) }),
+              region.id != selectedRegionID else { return }
+        selectedRegionID = region.id
+        RegionStore.saveSelected(region.id)
     }
 
-    /// Region name for the Server row: what the tunnel really started with while connected,
-    /// otherwise the selection. A single-region device keeps showing its profile's region.
+    /// Region name for the Server row: what the tunnel really started with while connected ("—" when
+    /// that is unknown), otherwise the selection. A single-region device keeps showing its profile's region.
     func serverDisplayName(connected: Bool) -> String? {
-        guard regions.count > 1 else { return currentProfile?.serverRegion }
-        if connected, let active = RegionStore.active() { return active.name }
-        return RegionPolicy.name(of: selectedRegionID, in: regions)
+        RegionPolicy.serverDisplayName(
+            regions: regions, selectedID: selectedRegionID, connected: connected,
+            active: RegionStore.active(), profileRegion: currentProfile?.serverRegion)
     }
 
     /// Back to Tokyo only (sign-out / revoked): the next activation may be a different invite.

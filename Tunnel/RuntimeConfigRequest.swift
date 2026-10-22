@@ -5,7 +5,8 @@ import Foundation
 enum RuntimeConfigRequest {
     static let defaultRegion = "tokyo"
 
-    static func isDefault(region: String) -> Bool { region == defaultRegion }
+    /// Region ids are compared case-insensitively (same rule as RegionPolicy in the app target).
+    static func isDefault(region: String) -> Bool { region.lowercased() == defaultRegion }
 
     private static let idCharacters = CharacterSet(
         charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")

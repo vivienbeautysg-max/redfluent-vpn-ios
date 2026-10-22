@@ -17,14 +17,13 @@ struct ProfileStatus: Codable, Equatable {
     let serverRegion: String
     let routingMode: String
     let monthlyQuotaGB: Int?
-    /// Only sent by multi-region backends; an older server means "not owner, Tokyo only".
-    var isOwner: Bool = false
+    /// Only sent by multi-region backends; an older server means Tokyo only.
     var regions: [VPNRegion] = [.tokyo]
 }
 
-/// Wire format of GET /profile. `isOwner` and `regions` come from multi-region backends only;
-/// a missing or malformed `regions` must never make the whole response fail (that would also
-/// hide the `enabled` revoke flag).
+/// Wire format of GET /profile. `regions` comes from multi-region backends only; a missing or
+/// malformed value must never make the whole response fail (that would also hide the `enabled`
+/// revoke flag). Fields the client does not read (e.g. `isOwner`) are deliberately not decoded.
 struct ProfileResponse: Decodable {
     let ok: Bool
     let error: String?
@@ -34,7 +33,6 @@ struct ProfileResponse: Decodable {
     let serverRegion: String?
     let routingMode: String?
     let monthlyQuotaGB: Int?
-    let isOwner: Bool?
     let regions: LossyArray<VPNRegion>?
 
     func status() throws -> ProfileStatus {
@@ -54,7 +52,6 @@ struct ProfileResponse: Decodable {
             serverRegion: region,
             routingMode: routing,
             monthlyQuotaGB: monthlyQuotaGB,
-            isOwner: isOwner ?? false,
             regions: RegionPolicy.offered(from: regions?.elements)
         )
     }

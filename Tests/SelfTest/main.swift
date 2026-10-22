@@ -37,11 +37,10 @@ let ownerProfile = """
 do {
     let old = try decode(ProfileResponse.self, oldProfile).status()
     check(old.regions == [.tokyo], "old backend (no regions key) -> [tokyo]")
-    check(old.isOwner == false, "old backend (no isOwner key) -> isOwner false")
     check(old.enabled && old.profileId == "p1" && old.monthlyQuotaGB == 200, "old backend: existing fields unchanged")
 
     let owner = try decode(ProfileResponse.self, ownerProfile).status()
-    check(owner.isOwner, "owner profile: isOwner true")
+    check(owner.enabled, "owner profile: decodes with the extra isOwner field present (it is not read)")
     check(owner.regions.map(\.id) == ["tokyo", "singapore"], "owner profile: region ids in order")
     check(owner.regions.map(\.name) == ["Tokyo", "Singapore"], "owner profile: region names")
     check(owner.regions.map(\.isDefault) == [true, false], "owner profile: isDefault flags")
@@ -232,6 +231,199 @@ do {
 } catch {
     check(false, "broken usage decode threw: \(error)")
 }
+
+// MARK: 6. malformed isOwner / regions never fail /profile (fix 4)
+
+section("6. malformed isOwner + regions together never fail /profile (revoke flag must survive)")
+
+let profileBase = #""ok":true,"enabled":false,"profileId":"p","ownerLabel":"x","serverRegion":"Tokyo","routingMode":"smart""#
+let malformedExtras = [
+    #""isOwner":"yes","regions":"oops""#,
+    #""isOwner":{"a":[1,2]},"regions":{"id":"singapore"}"#,
+    #""isOwner":null,"regions":[1,"x",null,{"id":""}]"#,
+    #""isOwner":42,"regions":[{"id":"tokyo","name":{"bad":true}}]"#,
+    #""isOwner":[],"regions":[[],[[]]]"#,
+]
+for (i, extra) in malformedExtras.enumerated() {
+    do {
+        let status = try decode(ProfileResponse.self, "{\(profileBase),\(extra)}").status()
+        check(status.enabled == false && status.regions == [.tokyo], "malformed variant \(i + 1): decodes, enabled=false kept, regions -> [tokyo]")
+    } catch {
+        check(false, "malformed variant \(i + 1) threw: \(error)")
+    }
+}
+
+// MARK: 7. region edge cases (fix 6)
+
+section("7. region edge cases: empty ids, duplicates, fallback, case")
+
+check(RegionPolicy.offered(from: [VPNRegion(id: "", name: "x"), VPNRegion(id: "   ", name: "y")]) == [.tokyo],
+      "regions with an empty id are ignored (nothing usable -> [tokyo])")
+let dupes = RegionPolicy.offered(from: [VPNRegion(id: "Singapore", name: "A"), VPNRegion(id: "singapore", name: "B"), VPNRegion.tokyo])
+check(dupes.map(\.name) == ["A", "Tokyo"], "repeated ids (any case) keep the first")
+do {
+    let trimmed = try decode(ProfileResponse.self, #"{"ok":true,"enabled":true,"profileId":"p","ownerLabel":"x","serverRegion":"T","routingMode":"s","regions":[{"id":"  singapore "},{"id":""}]}"#).status()
+    check(trimmed.regions.map(\.id) == ["singapore"], "ids are trimmed and the empty one is dropped at decode")
+} catch { check(false, "trim decode threw: \(error)") }
+
+let osakaDefault = [VPNRegion(id: "singapore", name: "Singapore"), VPNRegion(id: "osaka", name: "Osaka", isDefault: true)]
+check(RegionPolicy.resolveSelection(stored: "tokyo", offered: osakaDefault) == "osaka", "selection not offered -> the server's isDefault region")
+check(RegionPolicy.resolveSelection(stored: nil, offered: osakaDefault) == "osaka", "nothing stored -> the server's isDefault region")
+let noDefault = [VPNRegion(id: "singapore", name: "Singapore"), VPNRegion(id: "osaka", name: "Osaka")]
+check(RegionPolicy.resolveSelection(stored: "tokyo", offered: noDefault) == "singapore", "no isDefault flag -> the first region")
+check(RegionPolicy.resolveSelection(stored: "SINGAPORE", offered: both) == "singapore", "case-insensitive match returns the server's spelling")
+check(RegionPolicy.resolveSelection(stored: "Singapore", offered: [VPNRegion(id: "Singapore", name: "SG"), .tokyo]) == "Singapore",
+      "server spelling kept even when it is not lowercase (so the picker tag matches)")
+check(RegionPolicy.name(of: "SINGAPORE", in: both) == "Singapore", "name lookup is case-insensitive")
+check(RegionPolicy.matches("Tokyo", "tOKYO") && !RegionPolicy.matches("tokyo", "singapore"), "matches()")
+check(RegionPolicy.isDefault("TOKYO") && RegionPolicy.isDefault("Tokyo") && !RegionPolicy.isDefault("singapore"), "isDefault is case-insensitive")
+check(RuntimeConfigRequest.isDefault(region: "Tokyo") && RuntimeConfigRequest.isDefault(region: "TOKYO"), "extension: Tokyo in any case is the default region")
+check(RuntimeConfigRequest.url(base: base, region: "Tokyo")?.absoluteString == base + "/device/runtime-config", "extension: 'Tokyo' sends today's request")
+check(RuntimeConfigRequest.url(base: base, region: "Singapore")?.query == "region=Singapore", "extension: non-default id is sent as given")
+
+let mixedSuite = UserDefaults(suiteName: suiteName + ".mixed")!
+RegionStore.saveOffered(both, to: mixedSuite)
+RegionStore.saveSelected("Singapore", to: mixedSuite)
+check(RegionStore.selectedRegion(mixedSuite).id == "singapore", "stored 'Singapore' resolves to the offered 'singapore'")
+mixedSuite.removePersistentDomain(forName: suiteName + ".mixed")
+
+// MARK: 8. what the Server row shows (fix 5)
+
+section("8. Server row / In use caption / unavailable suite")
+
+let sg = ActiveRegion(id: "singapore", name: "Singapore")
+check(RegionPolicy.serverDisplayName(regions: both, selectedID: "singapore", connected: true, active: nil, profileRegion: "Tokyo") == "—",
+      "connected + active region unknown -> '—' (not the selection)")
+check(RegionPolicy.serverDisplayName(regions: both, selectedID: "tokyo", connected: true, active: sg, profileRegion: "Tokyo") == "Singapore",
+      "connected -> what the tunnel really started with")
+check(RegionPolicy.serverDisplayName(regions: both, selectedID: "singapore", connected: false, active: sg, profileRegion: "Tokyo") == "Singapore",
+      "disconnected -> the selection")
+check(RegionPolicy.serverDisplayName(regions: [.tokyo], selectedID: "tokyo", connected: true, active: nil, profileRegion: "Tokyo") == "Tokyo",
+      "single region keeps the profile's region (today's UI), connected or not")
+check(RegionPolicy.inUseCaption(connected: false, active: nil, selectedID: "singapore") == nil, "not connected -> no caption")
+check(RegionPolicy.inUseCaption(connected: true, active: nil, selectedID: "singapore") == "—", "connected + unknown -> '—'")
+check(RegionPolicy.inUseCaption(connected: true, active: sg, selectedID: "SINGAPORE") == nil, "connected + same region (any case) -> no caption")
+check(RegionPolicy.inUseCaption(connected: true, active: sg, selectedID: "tokyo") == "Singapore", "connected + different region -> its name")
+// Plant values in the process's private defaults: a "no suite" read must not fall back to them.
+UserDefaults.standard.set(["id": "singapore", "name": "Singapore"], forKey: RegionStore.activeKey)
+UserDefaults.standard.set("singapore", forKey: RegionStore.selectedKey)
+check(RegionStore.active(nil) == nil, "no App Group suite -> active region is unknown (no fallback to private defaults)")
+check(RegionStore.selectedID(nil) == "tokyo" && RegionStore.offered(nil) == [.tokyo], "no suite -> tokyo / [tokyo]")
+UserDefaults.standard.removeObject(forKey: RegionStore.activeKey)
+UserDefaults.standard.removeObject(forKey: RegionStore.selectedKey)
+
+// MARK: 9. which disconnects count as a failed start (fix 1)
+
+section("9. start-attempt tracking: only an attempt the app began that never connected")
+
+let t0 = Date(timeIntervalSince1970: 1_000_000)
+var tracker = StartAttemptTracker()
+tracker.begin(regionID: "singapore", now: t0)
+check(tracker.attemptForDisconnect(now: t0 + 2) == StartAttempt(startedAt: t0, regionID: "singapore"),
+      "app-started attempt that drops to disconnected -> reportable")
+
+tracker = StartAttemptTracker()
+tracker.begin(regionID: "tokyo", now: t0)
+tracker.reachedConnected()
+check(tracker.attemptForDisconnect(now: t0 + 30) == nil,
+      "connected -> reasserting -> disconnected (network change / on-demand) -> NOT a start failure, even inside the window")
+check(tracker.attemptForDisconnect(now: t0 + 600) == nil, "... and not later either")
+
+tracker = StartAttemptTracker()
+check(tracker.attemptForDisconnect(now: t0) == nil, "start that iOS triggered by itself (no app attempt) -> not reportable")
+
+tracker = StartAttemptTracker()
+tracker.begin(regionID: "singapore", now: t0)
+tracker.cancel()
+check(tracker.attemptForDisconnect(now: t0 + 1) == nil, "user disconnects / startVPNTunnel threw -> not reportable")
+
+tracker = StartAttemptTracker()
+tracker.begin(regionID: "singapore", now: t0)
+check(tracker.attemptForDisconnect(now: t0 + StartAttemptTracker.window + 1) == nil, "an attempt older than the window expires")
+check(tracker.attempt == nil, "expired attempt is dropped")
+
+tracker = StartAttemptTracker()
+tracker.begin(regionID: "singapore", now: t0)
+tracker.finish()
+check(tracker.attemptForDisconnect(now: t0 + 1) == nil, "reported once, not again")
+
+tracker = StartAttemptTracker()
+tracker.begin(regionID: "singapore", now: t0)
+check(tracker.attemptForDisconnect(now: t0 + 1) != nil && tracker.attemptForDisconnect(now: t0 + 2) != nil,
+      "looking at a disconnect does not consume the attempt (a stale one must not eat the real failure)")
+tracker.begin(regionID: "tokyo", now: t0 + 10)
+check(tracker.attempt?.regionID == "tokyo", "a new attempt replaces the old one")
+
+// MARK: 10. start-error channel (fix 3)
+
+section("10. start-error file: extension -> app, never stale")
+
+let failedAt = Date(timeIntervalSince1970: 2_000_000)
+let record = SharedContainer.encodeStartError(message: "Singapore server unavailable: HTTP 403: region not allowed", at: failedAt)
+check(TunnelStartError.message(from: record, since: failedAt - 5) == "Singapore server unavailable: HTTP 403: region not allowed",
+      "message written by the extension is read by the app")
+check(TunnelStartError.message(from: record, since: failedAt + 0.5) != nil, "1 s of clock slack")
+check(TunnelStartError.message(from: record, since: failedAt + 30) == nil, "an error older than this attempt is ignored (no stale errors)")
+check(TunnelStartError.message(from: nil, since: failedAt) == nil, "no file -> nil")
+check(TunnelStartError.message(from: Data("garbage".utf8), since: failedAt) == nil, "garbage file -> nil")
+check(TunnelStartError.message(from: SharedContainer.encodeStartError(message: "", at: failedAt), since: failedAt - 5) == nil, "empty message -> nil")
+let longRecord = SharedContainer.encodeStartError(message: String(repeating: "x", count: 900), at: failedAt)
+check(TunnelStartError.message(from: longRecord, since: failedAt - 5)?.count == 500, "message is capped at 500 characters")
+check(SharedContainer.startErrorFileName == TunnelStartError.fileName, "extension and app use the same file name")
+
+// MARK: 11. saved configuration follows the selection (fix 2)
+
+section("11. saved providerConfiguration / on-demand rule")
+
+let singaporeRegion = VPNRegion(id: "singapore", name: "Singapore")
+let merged = RegionPolicy.providerConfiguration(["token": "T", "apiBase": "https://x", "configProfile": "p", "region": "tokyo"], region: singaporeRegion)
+check(merged["region"] as? String == "singapore", "region replaced")
+check(merged["token"] as? String == "T" && merged["apiBase"] as? String == "https://x" && merged["configProfile"] as? String == "p",
+      "token, apiBase and the rest are kept")
+check(RegionPolicy.providerConfiguration(nil, region: singaporeRegion)["region"] as? String == "singapore", "no saved configuration -> just the region")
+check(RegionPolicy.serverAddress(for: singaporeRegion) == "RedFluent Singapore" && RegionPolicy.serverAddress(for: .tokyo) == "RedFluent Tokyo",
+      "serverAddress")
+check(RegionPolicy.disablesOnDemandAfterFailure(regionID: "singapore"), "failed non-default start -> on-demand off")
+check(!RegionPolicy.disablesOnDemandAfterFailure(regionID: "tokyo") && !RegionPolicy.disablesOnDemandAfterFailure(regionID: "Tokyo"),
+      "Tokyo keeps today's on-demand behaviour")
+
+// MARK: 12. usage numbers that are not finite or are negative (fix 7)
+
+section("12. usage: non-finite / negative values")
+
+let weirdIDs = ["d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9"]
+let weirdDevicesJSON = weirdIDs
+    .map { id in device(id, label: "U", name: "dev-" + id, model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: "") }
+    .joined(separator: ",")
+let plainDevices = (try? decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + weirdDevicesJSON + "]}"))?.devices ?? []
+check(plainDevices.count == 9, "9 plain devices decoded for the usage checks")
+let weird: [String: DeviceUsage] = [
+    "d1": DeviceUsage(usedGB: .nan, quotaGB: 100, percent: 10),
+    "d2": DeviceUsage(usedGB: .infinity, quotaGB: 100, percent: 10),
+    "d3": DeviceUsage(usedGB: -5, quotaGB: 100, percent: nil),
+    "d4": DeviceUsage(usedGB: 10, quotaGB: 100, percent: -50),
+    "d5": DeviceUsage(usedGB: 10, quotaGB: 100, percent: .nan),
+    "d6": DeviceUsage(usedGB: 10, quotaGB: .infinity, percent: 50),
+    "d7": DeviceUsage(usedGB: 1e308, quotaGB: 1e-300, percent: nil),
+    "d8": DeviceUsage(usedGB: 25, quotaGB: 100, percent: .infinity),
+    "d9": DeviceUsage(usedGB: 3, quotaGB: -10, percent: 5),
+]
+let weirdRows = (UsageMetrics.groups(devices: plainDevices, usage: weird).first?.rows ?? [])
+func weirdRow(_ id: String) -> UsageRow? { weirdRows.first(where: { $0.id == id }) }
+check(weirdRow("d1") == nil && weirdRow("d2") == nil, "usedGB NaN / infinite -> device not listed")
+check(weirdRow("d3")?.usedGB == 0 && weirdRow("d3")?.percent == 0 && weirdRow("d3")?.fraction == 0, "negative usedGB counts as 0 (0%, empty bar)")
+check(weirdRow("d4")?.percent == 0 && weirdRow("d4")?.fraction == 0, "negative percent clamps to 0")
+check(abs((weirdRow("d5")?.percent ?? -1) - 10) < 1e-9, "NaN percent is recomputed from used / quota")
+check(weirdRow("d6")?.quotaGB == nil && weirdRow("d6")?.fraction == nil && weirdRow("d6")?.amountText == "10.0 GB", "infinite quota -> no quota, no bar")
+check(weirdRow("d7")?.percent == nil && weirdRow("d7")?.fraction == nil, "used / quota overflowing to infinity -> no percent, no bar")
+check(abs((weirdRow("d8")?.percent ?? -1) - 25) < 1e-9, "infinite percent is recomputed")
+check(weirdRow("d9")?.quotaGB == nil && weirdRow("d9")?.fraction == nil, "negative quota -> no quota, no bar")
+check(weirdRows.allSatisfy { $0.fraction.map { $0.isFinite && $0 >= 0 && $0 <= 1 } ?? true }, "every bar fraction is finite and within 0...1")
+check(UsageRow(id: "x", displayName: "x", detail: nil, usedGB: 1, quotaGB: 1, percent: .nan, enabled: true).fraction == 0, "a NaN percent can never become a width")
+check(UsageRow(id: "x", displayName: "x", detail: nil, usedGB: 1, quotaGB: 1, percent: .infinity, enabled: true).fraction == 0, "an infinite percent can never become a width")
+if let total = UsageMetrics.groups(devices: plainDevices, usage: weird).first?.totalGB {
+    check(total.isFinite && total >= 0, "group total is finite")
+} else { check(false, "weird usage produced no group") }
 
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))

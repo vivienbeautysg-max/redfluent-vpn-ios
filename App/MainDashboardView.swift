@@ -111,12 +111,6 @@ struct MainDashboardView: View {
                     stopHeartbeat()
                 }
             }
-            .onChange(of: appState.selectedRegionID) { _, _ in
-                // Connected: reconnect so the new region takes effect. Disconnected: the choice is
-                // already saved and is used at the next connect.
-                guard tunnelManager.status.isConnected else { return }
-                Task { await tunnelManager.restart() }
-            }
         }
     }
 
@@ -188,11 +182,11 @@ struct MainDashboardView: View {
         Binding(get: { appState.selectedRegionID }, set: { appState.selectRegion($0) })
     }
 
-    /// The region the tunnel is really using, when that is not the selected one.
+    /// While connected: the region the tunnel really started with when it differs from the picker,
+    /// or "—" when that cannot be read.
     private var regionInUse: String? {
-        guard tunnelManager.status == .connected,
-              let active = RegionStore.active(), active.id != appState.selectedRegionID else { return nil }
-        return active.name
+        RegionPolicy.inUseCaption(connected: tunnelManager.status == .connected,
+                                  active: RegionStore.active(), selectedID: appState.selectedRegionID)
     }
 
     // 只在还没绑定时出现，绑好之后这张卡就永远消失 —— 不留常驻入口。

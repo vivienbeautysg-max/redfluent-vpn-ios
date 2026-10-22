@@ -29,12 +29,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func startTunnel(options: [String: NSObject]?) async throws {
         logger.info("startTunnel called")
         SharedContainer.clearActiveRegion()
+        SharedContainer.clearStartError()
 
-        #if HAS_LIBBOX
-        try await startWithLibbox()
-        #else
-        try await startWithoutEngine()
-        #endif
+        do {
+            #if HAS_LIBBOX
+            try await startWithLibbox()
+            #else
+            try await startWithoutEngine()
+            #endif
+        } catch {
+            // Hand the reason to the app through a file before iOS tears the extension down.
+            SharedContainer.writeStartError(error.localizedDescription)
+            throw error
+        }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
@@ -152,6 +159,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                           userInfo: [NSLocalizedDescriptionKey: RuntimeConfigRequest.failureMessage(
                               region: region, detail: fetched.failure ?? "no response")])
         }
+        logger.warning("falling back to the bundled Tokyo config: \(fetched.failure ?? "no response", privacy: .public)")
         guard let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
               let data = try? Data(contentsOf: url) else {
             throw NSError(domain: "rfv.tunnel", code: 200,

@@ -12,6 +12,7 @@ OUT="$(mktemp -d)/rfv-selftest"
 
 swiftc -o "$OUT" \
   App/Regions.swift \
+  App/StartAttempt.swift \
   App/UsageMetrics.swift \
   App/APIClient.swift \
   Tunnel/RuntimeConfigRequest.swift \
