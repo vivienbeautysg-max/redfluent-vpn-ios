@@ -783,6 +783,14 @@ check(LogoutPlan.allTitle(count: 3, label: "Alice") == "Log out all 3 devices of
       "log out all confirmation text")
 check(SignedOut.notice == "Signed out. Enter your invite code to reconnect.", "landing notice text")
 
+section("25. collapsible Owner Admin section titles")
+
+check(OwnerSectionTitle.counted("Invites", 6) == "Invites \u{00B7} 6", "Invites · 6")
+check(OwnerSectionTitle.counted("Activation Events", 0) == "Activation Events \u{00B7} 0", "Activation Events · 0")
+check(OwnerSectionTitle.counted("Activation Events", 80) == "Activation Events \u{00B7} 80", "Activation Events · 80")
+check(OwnerSectionTitle.devices(online: 2) == "Devices \u{00B7} 2 online", "Devices · 2 online")
+check(OwnerSectionTitle.devices(online: 0) == "Devices", "no device online -> just Devices")
+
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))
 exit(failures == 0 ? 0 : 1)

@@ -236,45 +236,42 @@ struct OwnerAdminView: View {
                         }
                     }
                 } header: {
-                    Button {
-                        withAnimation { appState.ownerInvitesExpanded.toggle() }
-                    } label: {
-                        HStack {
-                            Text("Invites \u{00B7} \(model.invites.count)")
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .rotationEffect(.degrees(appState.ownerInvitesExpanded ? 90 : 0))
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .textCase(nil)
+                    OwnerSectionHeader(title: OwnerSectionTitle.counted("Invites", model.invites.count),
+                                       isExpanded: $appState.ownerInvitesExpanded)
                 }
 
-                Section("Activation Events") {
-                    if model.activationEvents.isEmpty && !model.isLoading {
-                        Text("No activation attempts recorded yet")
-                            .foregroundStyle(Theme.Color.textSecondary)
+                Section {
+                    if appState.ownerActivationExpanded {
+                        if model.activationEvents.isEmpty && !model.isLoading {
+                            Text("No activation attempts recorded yet")
+                                .foregroundStyle(Theme.Color.textSecondary)
+                        }
+                        ForEach(model.activationEvents) { event in
+                            OwnerActivationEventRow(event: event)
+                        }
                     }
-                    ForEach(model.activationEvents) { event in
-                        OwnerActivationEventRow(event: event)
-                    }
+                } header: {
+                    OwnerSectionHeader(title: OwnerSectionTitle.counted("Activation Events", model.activationEvents.count),
+                                       isExpanded: $appState.ownerActivationExpanded)
                 }
 
-                Section(devicesHeader) {
-                    if model.devices.isEmpty && !model.isLoading {
-                        Text("No activated devices yet")
-                            .foregroundStyle(Theme.Color.textSecondary)
-                    }
-                    ForEach(model.devices) { device in
-                        Button {
-                            deviceToRename = device
-                        } label: {
-                            OwnerDeviceRow(device: device)
+                Section {
+                    if appState.ownerDevicesExpanded {
+                        if model.devices.isEmpty && !model.isLoading {
+                            Text("No activated devices yet")
+                                .foregroundStyle(Theme.Color.textSecondary)
                         }
-                        .buttonStyle(.plain)
+                        ForEach(model.devices) { device in
+                            Button {
+                                deviceToRename = device
+                            } label: {
+                                OwnerDeviceRow(device: device)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                } header: {
+                    OwnerSectionHeader(title: devicesHeader, isExpanded: $appState.ownerDevicesExpanded)
                 }
             }
             .overlay {
@@ -341,6 +338,8 @@ struct OwnerAdminView: View {
                     expandedUsers.insert(group.id)
                 }
                 if ScreenshotMode.expandsInvites { appState.ownerInvitesExpanded = true }
+                if ScreenshotMode.expandsActivationEvents { appState.ownerActivationExpanded = true }
+                if ScreenshotMode.expandsDevices { appState.ownerDevicesExpanded = true }
                 if let name = ScreenshotMode.confirmLogoutDevice,
                    let row = usageGroups.flatMap(\.rows).first(where: { $0.displayName == name }) {
                     deviceToLogOut = row
@@ -406,12 +405,35 @@ struct OwnerAdminView: View {
 
     private var devicesHeader: String {
         let n = model.devices.filter { ($0.online ?? $0.inUse) && $0.enabled }.count
-        return n > 0 ? "Devices \u{00B7} \(n) online" : "Devices"
+        return OwnerSectionTitle.devices(online: n)
     }
 
     private func refresh() async {
         guard let token = appState.currentProfile?.token else { return }
         await model.refresh(token: token)
+    }
+}
+
+/// Header of a collapsible Owner Admin section: the title and a chevron; tapping it opens or closes the section.
+private struct OwnerSectionHeader: View {
+    let title: String
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        Button {
+            withAnimation { isExpanded.toggle() }
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.Color.textSecondary)
+        .textCase(nil)
     }
 }
 

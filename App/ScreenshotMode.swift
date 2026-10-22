@@ -23,6 +23,7 @@ import Foundation
 ///   -RFVScreenshotMode member-signedout  被服务器登出的设备（停在激活页，带 "Signed out. ..." 提示）
 ///   -RFVExpandUser <label>        Owner Admin 里展开某个用户（Alice / Ben ...）
 ///   -RFVExpandInvites             Owner Admin 里展开 Invites 区（默认折叠）
+///   -RFVExpandEvents / -RFVExpandDevices  展开 Activation Events / Devices 区（同样默认折叠）
 ///   -RFVConfirmLogoutDevice <设备名>  直接弹出该设备的 Log out 确认框
 ///   -RFVConfirmLogoutAll <label>      直接弹出该用户的 Log out all 确认框
 enum ScreenshotMode {
@@ -59,6 +60,8 @@ enum ScreenshotMode {
     static var confirmLogoutDevice: String? { value(after: "-RFVConfirmLogoutDevice") }
     static var confirmLogoutAll: String? { value(after: "-RFVConfirmLogoutAll") }
     static var expandsInvites: Bool { ProcessInfo.processInfo.arguments.contains("-RFVExpandInvites") }
+    static var expandsActivationEvents: Bool { ProcessInfo.processInfo.arguments.contains("-RFVExpandEvents") }
+    static var expandsDevices: Bool { ProcessInfo.processInfo.arguments.contains("-RFVExpandDevices") }
 
     /// 传 -RFVOpenEditInvite 3 时，Owner Admin 一出来就打开第 3 个邀请的编辑页。
     static var editInviteIndex: Int? {

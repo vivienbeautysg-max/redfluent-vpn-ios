@@ -66,6 +66,14 @@ enum LogoutPlan {
     }
 }
 
+enum OwnerSectionTitle {
+    /// "Invites · 6", "Activation Events · 0".
+    static func counted(_ title: String, _ n: Int) -> String { "\(title) \u{00B7} \(n)" }
+
+    /// "Devices · 2 online", or just "Devices" when none is online.
+    static func devices(online n: Int) -> String { n > 0 ? "Devices \u{00B7} \(n) online" : "Devices" }
+}
+
 enum SignedOut {
     /// Shown on the activation screen when the server signed this device out.
     static let notice = "Signed out. Enter your invite code to reconnect."

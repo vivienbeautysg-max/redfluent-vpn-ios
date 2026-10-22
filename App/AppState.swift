@@ -21,6 +21,9 @@ final class AppState: ObservableObject {
     @Published private(set) var signedOut = false
     /// Owner Admin: is the Invites section open? Collapsed by default, remembered while the app runs.
     @Published var ownerInvitesExpanded = false
+    /// The other two Owner Admin sections are collapsed by default as well, and remembered the same way.
+    @Published var ownerActivationExpanded = false
+    @Published var ownerDevicesExpanded = false
 
     private let api = APIClient.shared
 
