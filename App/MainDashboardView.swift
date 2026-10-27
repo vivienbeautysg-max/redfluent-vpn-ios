@@ -60,9 +60,9 @@ struct MainDashboardView: View {
                 .padding(.bottom, 20)
             }
             .scrollBounceBehavior(.basedOnSize)
+            .actionBanner($feedback)   // inside the reader: the banner's space never flips the compact layout
         }
         .rfPage()
-        .actionBanner($feedback)
         .sheet(isPresented: $showingDiagnostics) {
             DiagnosticsView()
                 .environmentObject(appState)

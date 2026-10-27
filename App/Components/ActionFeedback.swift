@@ -2,8 +2,9 @@ import SwiftUI
 import UIKit
 
 // What the user hears back after asking the server for something (create, save, delete, restore, log out,
-// activate). One component for every such action: a banner pinned to the top of the screen, so the answer is
-// seen whatever the scroll position and with the keyboard up.
+// activate). One component for every such action: a banner at the top of the screen, so the answer is seen
+// whatever the scroll position and with the keyboard up. It takes its own space there (the page slides down under
+// it), so it never covers a title or a field.
 
 struct ActionFeedback: Equatable, Identifiable {
     enum Kind { case success, failure }
@@ -67,45 +68,47 @@ struct ActionBanner: View {
 }
 
 extension View {
-    /// Shows `feedback` as a banner over the top of this view (`topInset` below its top edge), with the success or
-    /// error haptic and a VoiceOver announcement. Put it on the part of the page under the pinned bar.
-    func actionBanner(_ feedback: Binding<ActionFeedback?>, topInset: CGFloat = 6) -> some View {
-        modifier(ActionBannerHost(feedback: feedback, topInset: topInset))
+    /// Shows `feedback` as a banner at the top of this view, in its own space: the view slides down under it on the
+    /// banner spring and back up when it goes, so nothing is ever covered. With the success or error haptic and a
+    /// VoiceOver announcement. Put it on the whole screen (a page whose layout depends on its height: inside its
+    /// GeometryReader, so the banner does not change that layout).
+    func actionBanner(_ feedback: Binding<ActionFeedback?>) -> some View {
+        modifier(ActionBannerHost(feedback: feedback))
     }
 }
 
 private struct ActionBannerHost: ViewModifier {
     @Binding var feedback: ActionFeedback?
-    let topInset: CGFloat
     @Environment(\.rfReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .top) {
-                ZStack {
-                    if let shown = feedback {
-                        ActionBanner(feedback: shown)
-                            .padding(.horizontal, 16)
-                            .padding(.top, topInset)
-                            .onTapGesture { feedback = nil }
-                            .id(shown.id)
-                            .transition(.asymmetric(
-                                insertion: reduceMotion ? .opacity : .opacity.combined(with: .offset(y: -10)),
-                                removal: .opacity.animation(Motion.bannerOut)))
-                    }
-                }
-                .animation(reduceMotion ? Motion.fade : Motion.bannerIn, value: feedback?.id)
+        VStack(spacing: 0) {
+            if let shown = feedback {
+                ActionBanner(feedback: shown)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 4)
+                    .onTapGesture { feedback = nil }
+                    .id(shown.id)
+                    .transition(.asymmetric(
+                        insertion: reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity.animation(Motion.bannerOut)))
             }
-            .onChange(of: feedback?.id) { _, id in
-                guard id != nil, let shown = feedback else { return }
-                if shown.kind == .success { Haptics.success() } else { Haptics.failure() }
-                AccessibilityNotification.Announcement(shown.text).post()
-            }
-            .task(id: feedback?.id) {
-                guard let shown = feedback else { return }
-                try? await Task.sleep(for: .seconds(shown.seconds))
-                if feedback?.id == shown.id { feedback = nil }
-            }
+            content
+        }
+        .background(Theme.Color.paper.ignoresSafeArea())
+        // The page moves with the banner, down as it comes and back up as it goes, on the same spring.
+        .animation(reduceMotion ? Motion.fade : Motion.bannerIn, value: feedback?.id)
+        .onChange(of: feedback?.id) { _, id in
+            guard id != nil, let shown = feedback else { return }
+            if shown.kind == .success { Haptics.success() } else { Haptics.failure() }
+            AccessibilityNotification.Announcement(shown.text).post()
+        }
+        .task(id: feedback?.id) {
+            guard let shown = feedback else { return }
+            try? await Task.sleep(for: .seconds(shown.seconds))
+            if feedback?.id == shown.id { feedback = nil }
+        }
     }
 }
 

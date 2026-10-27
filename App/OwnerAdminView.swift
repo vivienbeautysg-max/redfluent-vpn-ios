@@ -305,8 +305,8 @@ struct OwnerAdminView: View {
                 }
             }
         }
-        // One banner for every Owner Admin page, below their pinned bars; it stays put through a push or pop.
-        .actionBanner($model.feedback, topInset: Theme.barHeight + 6)
+        // One banner for every Owner Admin page, at the top of the sheet; it stays put through a push or pop.
+        .actionBanner($model.feedback)
         .sheet(isPresented: $showingCreateInvite, onDismiss: { Task { await refresh() } }) {
             CreateInviteView()
                 .environmentObject(appState)

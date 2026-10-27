@@ -48,8 +48,8 @@ struct CreateInviteView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .underPinnedBar()
-            .actionBanner($feedback)
         }
+        .actionBanner($feedback)
         .rfPage()
         .task { await probeAccessSupport() }
         #if DEBUG
@@ -183,7 +183,9 @@ struct CreateInviteView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { createdInvite = invite }
                 code = invite.code
                 label = invite.label
-                feedback = .success("Invite created")
+                // The page itself now says "Invite created." in its title: no banner, the haptic and VoiceOver only.
+                Haptics.success()
+                AccessibilityNotification.Announcement("Invite created").post()
             } catch {
                 feedback = .failure(error.localizedDescription)
             }

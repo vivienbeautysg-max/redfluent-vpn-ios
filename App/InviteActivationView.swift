@@ -67,9 +67,9 @@ struct InviteActivationView: View {
                 .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
+            .actionBanner($feedback)   // inside the reader: the banner's space never flips the compact layout
         }
         .rfPage()
-        .actionBanner($feedback)
         .onChange(of: appState.lastActivationError) { _, error in
             // Activation and Apple recovery both report here; the banner shows it above the keyboard.
             if let error { feedback = .failure(error) }

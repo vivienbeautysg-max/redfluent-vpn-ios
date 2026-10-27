@@ -1357,9 +1357,19 @@ check(![createSource, personSource, adminSource, activationSource, dashboardSour
       "sources for the feedback checks are readable")
 
 // the one component
-check(feedbackSource.contains(".overlay(alignment: .top)") && feedbackSource.contains("Haptics.success()")
-      && feedbackSource.contains("Haptics.failure()") && feedbackSource.contains("AccessibilityNotification.Announcement"),
-      "banner: pinned to the top of the page, success / error haptic, VoiceOver announcement")
+let feedbackSquashed = squashed(feedbackSource)
+check(feedbackSquashed.contains("VStack(spacing: 0) { if let shown = feedback {") && feedbackSquashed.contains("} content }")
+      && !feedbackSource.contains(".overlay(")
+      && feedbackSource.contains(".animation(reduceMotion ? Motion.fade : Motion.bannerIn, value: feedback?.id)"),
+      "banner: at the top in its own space, the page slides down under it and back up (it never covers a title or a field)")
+check(feedbackSource.contains("Haptics.success()") && feedbackSource.contains("Haptics.failure()")
+      && feedbackSource.contains("AccessibilityNotification.Announcement"), "banner: success / error haptic, VoiceOver announcement")
+check([createSource, personSource, adminSource, activationSource, dashboardSource, feedbackSource].allSatisfy { !$0.contains("topInset") },
+      "banner: no page places it over its content with an inset any more")
+for (file, text) in [("MainDashboardView", dashboardSource), ("InviteActivationView", activationSource)] {
+    check(appears("GeometryReader", before: ".actionBanner($feedback)", in: text) && appears(".actionBanner($feedback)", before: ".rfPage()", in: text),
+          "\(file): the banner sits inside the GeometryReader (its space does not flip the compact layout)")
+}
 check(feedbackSource.contains("#selector(UIResponder.resignFirstResponder)"),
       "EditCommit ends editing, which commits text the keyboard is still composing")
 check(APIError.status(409, #"{"ok":false,"error":"invite code already exists"}"#).localizedDescription == "This code is already in use.",
@@ -1373,8 +1383,11 @@ check(appears("EditCommit.endEditing()", before: "code.trimmingCharacters", in: 
       "create: the fields are read only after editing ended (what is on screen is what is sent)")
 check(createBody.contains("guard !isCreating, createdInvite == nil else { return }"),
       "create: one POST per invite (busy or already created -> nothing is sent)")
-check(createSource.contains(".actionBanner($feedback)") && createBody.contains("feedback = .success(")
-      && createBody.contains("feedback = .failure("), "create: success and failure answer in the banner")
+check(createSource.contains(".actionBanner($feedback)") && createBody.contains("feedback = .failure(")
+      && !createBody.contains("feedback = .success(") && appears("createdInvite = invite", before: "Haptics.success()", in: createBody),
+      "create: a failure answers in the banner; success is the page itself ('Invite created.') with the haptic, no banner on it")
+check(appears("BarRow(", before: ".actionBanner($feedback)", in: createSource) && appears(".actionBanner($feedback)", before: ".rfPage()", in: createSource),
+      "create: the banner is on the whole page (bar and form slide down under it)")
 /// The source with every run of whitespace turned into one space (layout checks that ignore indentation).
 func squashed(_ text: String) -> String {
     text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
