@@ -211,12 +211,52 @@ enum LastGoodTunnelConfig {
     /// Must stay identical to SharedContainer.lastGoodFileName in the tunnel target.
     static let fileName = "last-good-config.json"
 
-    /// Signed out: the device's saved credentials go too.
+    /// Signed out: the device's saved credentials go too. Call only once the tunnel has stopped.
     static func clear() {
         guard let url = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: RegionStore.appGroupID)?
             .appendingPathComponent(fileName) else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+}
+
+/// The device token, mirrored into the App Group for the tunnel extension, which then always sends the freshest
+/// one (renewals included) instead of the copy saved in the VPN configuration at the last Connect.
+/// Written and removed only by ProfileStore, together with the profile.
+enum DeviceTokenMirror {
+    /// Must stay identical to SharedContainer.deviceTokenFileName in the tunnel target.
+    static let fileName = "device-token"
+
+    static func fileURL() -> URL? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: RegionStore.appGroupID)?
+            .appendingPathComponent(fileName)
+    }
+
+    /// The file's bytes; nil for a blank token.
+    static func encode(_ token: String) -> Data? {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : Data(trimmed.utf8)
+    }
+
+    /// Atomic, readable from the first unlock after boot (on-demand starts while locked), not in backups.
+    /// On any failure the old copy is removed, so the tunnel falls back to its saved token rather than an older one.
+    static func write(_ token: String) {
+        guard let url = fileURL() else { return }
+        do {
+            guard let data = encode(token) else { throw CocoaError(.fileWriteUnknown) }
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var target = url
+            try target.setResourceValues(values)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    static func clear() {
+        if let url = fileURL() { try? FileManager.default.removeItem(at: url) }
     }
 }
 

@@ -1084,12 +1084,19 @@ check(startDecision(.http(status: 403, error: "invite expired"), region: "singap
       "403 invite expired in Singapore -> expired, as before")
 check(startDecision(.http(status: 401, error: "unauthorized"), region: "tokyo", lastGood: freshTokyo) == refused(401, "Access revoked", clears: true),
       "401 (signed out) -> refuse + clear")
-check(startDecision(.http(status: 401, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(401, "Access revoked", clears: true),
-      "401 without a JSON body -> refuse + clear (never connect on a 401)")
+check(startDecision(.http(status: 401, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood,
+      "bare 401 (CDN / WAF / portal page, no JSON error) -> unreachable: saved config, nothing cleared")
 check(startDecision(.http(status: 403, error: "device revoked"), region: "tokyo", lastGood: freshTokyo) == refused(403, "Access revoked", clears: true),
       "403 revoked -> refuse + clear")
-check(startDecision(.http(status: 403, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(403, "Access revoked", clears: true),
-      "403 without a JSON body -> refuse + clear")
+check(startDecision(.http(status: 403, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood,
+      "bare 403 (no JSON error) -> unreachable: saved config, nothing cleared")
+check(startDecision(.http(status: 404, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood,
+      "bare 404 (older backend / proxy page) -> unreachable: saved config")
+check(startDecision(.http(status: 401, error: nil), region: "tokyo", lastGood: nil) == refused(230, "Can't reach server", clears: false),
+      "bare 401, nothing saved -> Can't reach server (not 'Access revoked', nothing cleared)")
+check(startDecision(.http(status: 403, error: nil), region: "singapore", lastGood: freshTokyo)
+      == refused(210, "Singapore server unavailable: HTTP x", clears: false),
+      "bare 403 in Singapore -> the region message, saved config kept")
 check(startDecision(.http(status: 404, error: "device not found"), region: "tokyo", lastGood: freshTokyo) == refused(404, "Device not found", clears: true),
       "404 (deleted / unknown device) -> refuse + clear")
 check(startDecision(.http(status: 401, error: "unauthorized"), region: "singapore", lastGood: freshTokyo)
@@ -1135,11 +1142,27 @@ check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow, r
 // other answers
 check(startDecision(.http(status: 400, error: "bad request"), region: "tokyo", lastGood: freshTokyo) == refused(400, "Server error 400", clears: false),
       "400 -> refuse, keep the saved config")
-check(startDecision(.http(status: 409, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(409, "Server error 409", clears: false),
-      "409 -> refuse, keep the saved config")
+check(startDecision(.http(status: 409, error: "conflict"), region: "tokyo", lastGood: freshTokyo) == refused(409, "Server error 409", clears: false),
+      "409 from our backend -> refuse, keep the saved config")
+check(startDecision(.http(status: 409, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood
+      && startDecision(.http(status: 400, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood,
+      "bare 4xx (no JSON error) -> unreachable")
 check(StartPolicy.isUnreachable(.network) && StartPolicy.isUnreachable(.http(status: 500, error: nil))
-      && !StartPolicy.isUnreachable(.http(status: 404, error: nil)) && !StartPolicy.isUnreachable(.http(status: 401, error: nil))
+      && StartPolicy.isUnreachable(.http(status: 401, error: nil)) && StartPolicy.isUnreachable(.http(status: 404, error: nil))
+      && !StartPolicy.isUnreachable(.http(status: 404, error: "device not found")) && !StartPolicy.isUnreachable(.http(status: 401, error: "unauthorized"))
       && !StartPolicy.isUnreachable(.config(region: nil)) && !StartPolicy.isUnreachable(.notActivated), "what counts as unreachable")
+check(StartPolicy.endsAccess(.http(status: 401, error: "unauthorized")) && StartPolicy.endsAccess(.http(status: 403, error: "device revoked"))
+      && StartPolicy.endsAccess(.http(status: 404, error: "device not found")) && StartPolicy.endsAccess(.http(status: 403, error: "invite expired"))
+      && !StartPolicy.endsAccess(.http(status: 401, error: nil)) && !StartPolicy.endsAccess(.http(status: 403, error: nil))
+      && !StartPolicy.endsAccess(.http(status: 404, error: nil)) && !StartPolicy.endsAccess(.http(status: 403, error: "region not allowed"))
+      && !StartPolicy.endsAccess(.http(status: 500, error: "boom")) && !StartPolicy.endsAccess(.network),
+      "ends access = our backend's JSON error on 401 / 403 (not region) / 404, nothing else")
+let accessAnswers: [(Int, String?)] = [(401, "unauthorized"), (403, "device revoked"), (403, "region not allowed"),
+                                        (401, nil), (403, nil), (500, nil)]
+check(accessAnswers.allSatisfy { answer in
+          let outcome = RuntimeConfigOutcome.http(status: answer.0, error: answer.1)
+          return (FollowPolicy.stopKind(of: outcome) != nil) == StartPolicy.endsAccess(outcome)
+      }, "start and follow agree on what ends access (401 / 403)")
 check(StartPolicy.lastGoodMaxAge == 30 * day, "last good config: at most 30 days")
 
 // the saved record
@@ -1171,6 +1194,107 @@ check(!tunnelSource.isEmpty && !tunnelSource.contains("review-tunnel") && !tunne
       "the extension never reads a bundled config")
 check(!projectSpec.isEmpty && !projectSpec.contains("path: Tunnel/Resources") && projectSpec.contains("- Resources"),
       "project.yml does not ship Tunnel/Resources (and still excludes it from the Tunnel sources)")
+
+// MARK: 34. Tunnel review fixes: fresh token, save after start, one sign-out path
+
+section("34. tunnel review fixes: freshest token, last good saved only once running, sign-out clean-up order, timeout")
+
+/// `func <name>` up to the end of its body (the next line that is just "    }", i.e. a type member).
+func functionBody(_ name: String, in source: String) -> String {
+    guard let start = source.range(of: "func \(name)") else { return "" }
+    let rest = source[start.lowerBound...]
+    guard let end = rest.range(of: "\n    }\n") else { return String(rest) }
+    return String(rest[..<end.upperBound])
+}
+func offset(of needle: String, in text: String) -> Int? {
+    text.range(of: needle).map { text.distance(from: text.startIndex, to: $0.lowerBound) }
+}
+func appears(_ first: String, before second: String, in text: String) -> Bool {
+    guard let a = offset(of: first, in: text), let b = offset(of: second, in: text) else { return false }
+    return a < b
+}
+func source(_ path: String) -> String {
+    (try? String(contentsOfFile: repoRoot + "/" + path, encoding: .utf8)) ?? ""
+}
+let providerSource = source("Tunnel/PacketTunnelProvider.swift")
+let appStateSource = source("App/AppState.swift")
+let appRootSource = source("App/RedFluentVPNApp.swift")
+let tunnelManagerSource = source("App/TunnelManager.swift")
+let profileStoreSource = source("App/ProfileStore.swift")
+let regionsSource = source("App/Regions.swift")
+check(![providerSource, appStateSource, appRootSource, tunnelManagerSource, profileStoreSource, regionsSource].contains(""),
+      "sources for the order checks are readable")
+
+// 1. the freshest token
+check(RuntimeConfigRequest.token(appGroup: "fresh", saved: "old") == "fresh", "token: the App Group copy wins over the saved one")
+check(RuntimeConfigRequest.token(appGroup: nil, saved: "old") == "old", "token: no App Group copy (app updated from 1.2, not run yet) -> saved one")
+check(RuntimeConfigRequest.token(appGroup: " \n", saved: "old") == "old" && RuntimeConfigRequest.token(appGroup: " fresh\n", saved: "old") == "fresh",
+      "token: a blank copy does not count; whitespace is trimmed")
+check(RuntimeConfigRequest.token(appGroup: nil, saved: nil) == nil && RuntimeConfigRequest.token(appGroup: "", saved: "") == nil,
+      "token: none at all -> nil (the start is refused as not activated)")
+check(SharedContainer.deviceTokenFileName == DeviceTokenMirror.fileName, "app and extension use the same token file name")
+check(SharedContainer.decodeDeviceToken(DeviceTokenMirror.encode("tkn-123")) == "tkn-123", "token file round trip")
+check(DeviceTokenMirror.encode("  ") == nil && SharedContainer.decodeDeviceToken(nil) == nil
+      && SharedContainer.decodeDeviceToken(Data("\n".utf8)) == nil, "a blank token is never written or read")
+check(functionBody("save(", in: profileStoreSource).contains("DeviceTokenMirror.write(profile.token)")
+      && functionBody("clear()", in: profileStoreSource).contains("DeviceTokenMirror.clear()"),
+      "ProfileStore: every save writes the token copy, every clear removes it")
+let appSwiftFiles = (FileManager.default.enumerator(atPath: repoRoot + "/App")?.allObjects as? [String] ?? [])
+    .filter { $0.hasSuffix(".swift") }
+let mirrorWriters = appSwiftFiles
+    .filter { !["ProfileStore.swift", "Regions.swift"].contains($0) && source("App/" + $0).contains("DeviceTokenMirror.") }
+check(appSwiftFiles.count > 20 && mirrorWriters.isEmpty,
+      "only ProfileStore touches the token copy (checked \(appSwiftFiles.count) files; others: \(mirrorWriters.joined(separator: ", ")))")
+check(functionBody("write(", in: regionsSource).contains(".completeFileProtectionUntilFirstUserAuthentication")
+      && functionBody("write(", in: regionsSource).contains(".atomic")
+      && functionBody("write(", in: regionsSource).contains("isExcludedFromBackup = true"),
+      "token copy: atomic, readable after first unlock, not in backups")
+check(appStateSource.contains("ProfileStore.syncTokenMirror()"), "launch writes the copy for an app updated from 1.2")
+check(functionBody("fetchPerDeviceConfigData", in: providerSource).contains("RuntimeConfigRequest.token(appGroup: SharedContainer.readDeviceToken()"),
+      "the extension sends the App Group token first")
+
+// 4. last good only once the engine runs it
+check(StartPolicy.refreshesLastGood(fetched: Data("a".utf8), running: Data("a".utf8)), "follow check: same config as running -> refresh its time")
+check(!StartPolicy.refreshesLastGood(fetched: Data("b".utf8), running: Data("a".utf8))
+      && !StartPolicy.refreshesLastGood(fetched: nil, running: Data("a".utf8))
+      && !StartPolicy.refreshesLastGood(fetched: Data("a".utf8), running: nil), "follow check: another config (never started) or none -> not saved")
+let unordered = Data(#"{"route":{"final":"proxy"},"outbounds":[{"type":"vless"}],"dns":{"strategy":"ipv4_only"}}"#.utf8)
+let sortedConfig = (try? JSONSerialization.jsonObject(with: unordered)).flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
+check(sortedConfig != nil && SharedContainer.decodeLastGood(SharedContainer.encodeLastGood(
+          config: unordered, region: "tokyo", serverRegion: nil, fetchedAt: startNow))?.config == sortedConfig,
+      "a saved config reads back byte-equal to the fetched form (sorted keys), so 'same config' is comparable")
+check(functionBody("fetchPerDeviceConfigData", in: providerSource).contains("withJSONObject: rc, options: [.sortedKeys]"),
+      "fetched configs are serialised with sorted keys")
+let loadBody = functionBody("loadConfig()", in: providerSource)
+let startBody = functionBody("startWithLibbox()", in: providerSource)
+let reloadBody = functionBody("reloadEngine(", in: providerSource)
+check(!loadBody.isEmpty && !loadBody.contains("keepLastGood(") && !loadBody.contains("writeLastGood("),
+      "start: nothing is saved while the config is only loaded")
+check(appears("startOrReloadService(", before: "keepLastGood(", in: startBody), "start: saved only after the engine started with it")
+check(appears("startOrReloadService(", before: "keepLastGood(", in: reloadBody), "region switch: saved only after the engine reloaded with it")
+check(functionBody("followCheck(", in: providerSource).contains("StartPolicy.refreshesLastGood("),
+      "follow check without reload: saved only when it is the running config")
+
+// 3. one sign-out path
+check(functionBody("signOut()", in: appStateSource).contains("signOutCount += 1"), "user sign-out raises the sign-out event")
+check(functionBody("refresh()", in: appStateSource).contains("signOutCount += 1"), "server sign-out raises the same event")
+check(appears(".onChange(of: appState.signOutCount)", before: "tunnelManager.stopForSignOut()", in: appRootSource)
+      && !appRootSource.contains(".onChange(of: appState.signedOut)"),
+      "the app root reacts to every sign-out with stopForSignOut (one place)")
+
+// 5. clean-up order
+let stopBody = functionBody("stopForSignOut()", in: tunnelManagerSource)
+check(appears("stopVPNTunnel()", before: "waitUntilDown(", in: stopBody) && appears("waitUntilDown(", before: "removeFromPreferences()", in: stopBody)
+      && appears("removeFromPreferences()", before: "LastGoodTunnelConfig.clear()", in: stopBody),
+      "sign-out: stop, wait until down, remove the configuration, and only then delete the last good config")
+check(functionBody("keepLastGood(", in: providerSource).contains("stopRequested"), "the extension saves nothing once told to stop")
+check(appears("stopRequested = true", before: "stopFollowing()", in: functionBody("stopTunnel(", in: providerSource))
+      && appears("stopRequested = true", before: "clearLastGood()", in: functionBody("stopForServer(", in: providerSource)),
+      "stop flag is set before anything is torn down or cleared")
+
+// 6. timeout
+check(RuntimeConfigRequest.timeout == 15 && functionBody("fetchPerDeviceConfigData", in: providerSource).contains("timeoutInterval = RuntimeConfigRequest.timeout"),
+      "runtime-config: one request, 15 s timeout")
 
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))

@@ -1,6 +1,8 @@
 import Foundation
 import Security
 
+/// The device profile (Keychain). Also the only place that keeps the tunnel's copy of the device token
+/// (DeviceTokenMirror) in step: every save writes it, every clear removes it.
 enum ProfileStore {
     private static let service = "com.redfluent.vpn.profile"
     private static let account = "deviceProfile"
@@ -21,8 +23,15 @@ enum ProfileStore {
 
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess else {
+            DeviceTokenMirror.clear()   // the old profile was deleted above, so its token goes too
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
+        DeviceTokenMirror.write(profile.token)
+    }
+
+    /// At launch: give the tunnel the stored token (an app updated from 1.2 has no copy until it runs once).
+    static func syncTokenMirror() {
+        if let profile = load() { DeviceTokenMirror.write(profile.token) }
     }
 
     static func load() -> DeviceProfile? {
@@ -46,5 +55,6 @@ enum ProfileStore {
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)
+        DeviceTokenMirror.clear()
     }
 }

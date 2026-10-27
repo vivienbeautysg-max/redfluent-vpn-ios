@@ -96,7 +96,7 @@ enum FollowPolicy {
 
 /// What the tunnel does at start with the answer of `GET /device/runtime-config`.
 enum StartDecision: Equatable {
-    /// Connect with the config just fetched (and keep it as this device's last good one).
+    /// Connect with the config just fetched (kept as this device's last good one once the engine runs it).
     case useFetched
     /// The server could not be reached: connect with the last config the server issued to this device.
     case useLastGood
@@ -120,17 +120,25 @@ enum StartPolicy {
         return age >= -clockSlack && age <= lastGoodMaxAge
     }
 
-    /// No usable answer: offline, timeout, 5xx, 408 / 429, or a 2xx without a config (a portal or proxy page).
+    /// No usable answer: offline, timeout, 5xx, 408 / 429, a 2xx without a config, or any answer without our
+    /// backend's JSON `error` (a CDN / WAF / captive portal / hotel proxy page, whatever its status).
     /// Says nothing about this device's access.
     static func isUnreachable(_ outcome: RuntimeConfigOutcome) -> Bool {
         switch outcome {
         case .network:
             return true
-        case .http(let status, _):
-            return status >= 500 || status == 408 || status == 429 || (200..<300).contains(status)
+        case .http(let status, let error):
+            return error == nil || status >= 500 || status == 408 || status == 429 || (200..<300).contains(status)
         case .config, .notActivated:
             return false
         }
+    }
+
+    /// Our backend's own answer that ends this device's access. The backend always sends a JSON `error` with
+    /// these, so a bare 401 / 403 / 404 is not one. Same rule as FollowPolicy.stopKind, plus 404 (unknown device).
+    static func endsAccess(_ outcome: RuntimeConfigOutcome) -> Bool {
+        guard case .http(let status, let error) = outcome, error != nil else { return false }
+        return status == 404 || FollowPolicy.stopKind(status: status, error: error) != nil
     }
 
     /// - Parameters:
@@ -151,9 +159,8 @@ enum StartPolicy {
         if FollowPolicy.blocksStart(outcome) {
             return .refuse(code: 403, message: StopKind.expired.message, clearsLastGood: true)
         }
-        // Signed out, deleted, revoked, unknown device. A 403 "region ..." is about the region asked for, not the device.
-        if case .http(let status, let error) = outcome, [401, 403, 404].contains(status),
-           !(status == 403 && (error?.lowercased().contains("region") ?? false)) {
+        // Signed out, deleted, revoked, unknown device, as our backend says it.
+        if endsAccess(outcome), case .http(let status, _) = outcome {
             guard isDefault else {
                 return .refuse(code: 210, message: RuntimeConfigRequest.failureMessage(region: region, detail: detail),
                                clearsLastGood: true)
@@ -173,10 +180,17 @@ enum StartPolicy {
             }
             return .refuse(code: 230, message: unreachableMessage, clearsLastGood: false)
         }
-        // Any other answer (400, 409, 403 "region ..."): the server refused this request; keep what is saved.
+        // Any other answer from our backend (400, 409, 403 "region ..."): it refused this request; keep what is saved.
         guard case .http(let status, _) = outcome else {
             return .refuse(code: 230, message: unreachableMessage, clearsLastGood: false)
         }
         return .refuse(code: status, message: "Server error \(status)", clearsLastGood: false)
+    }
+
+    /// A follow check that keeps the engine running: refresh the saved config's time only when the server sent
+    /// exactly the config the engine runs (both serialised with sorted keys). Anything else was never started.
+    static func refreshesLastGood(fetched: Data?, running: Data?) -> Bool {
+        guard let fetched, let running else { return false }
+        return fetched == running
     }
 }

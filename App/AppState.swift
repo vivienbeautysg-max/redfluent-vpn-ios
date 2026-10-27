@@ -19,6 +19,9 @@ final class AppState: ObservableObject {
     @Published private(set) var expiry: ExpiryInfo = .none
     /// The server signed this device out: the activation screen shows a short notice until the next activation.
     @Published private(set) var signedOut = false
+    /// Goes up on every sign-out, by the server or by the user. The app root reacts once, in one place: stop the
+    /// tunnel, remove the VPN configuration, delete the last good config (TunnelManager.stopForSignOut).
+    @Published private(set) var signOutCount = 0
 
     private let api = APIClient.shared
 
@@ -42,6 +45,7 @@ final class AppState: ObservableObject {
         #endif
         if let stored = ProfileStore.load() {
             activation = .activated(stored)
+            ProfileStore.syncTokenMirror()
         }
         // 后端会在 token 快过期时顺带发回新的，这里静默换掉。
         // 用户不该因为「90 天没打开过」就被登出。
@@ -180,6 +184,7 @@ final class AppState: ObservableObject {
                 resetRegions()
                 signedOut = true
                 activation = .notActivated
+                signOutCount += 1
             } else {
                 applyOfferedRegions(status.regions)
                 applyExpiry(ExpiryInfo(expired: status.expired, expiresAt: status.expiresAt, daysLeft: status.daysLeft))
@@ -194,11 +199,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The user signs this device out: same clean-up as a server sign-out (see signOutCount), without the notice.
     func signOut() {
         ProfileStore.clear()
         resetRegions()
         signedOut = false
         activation = .notActivated
         lastActivationError = nil
+        signOutCount += 1
     }
 }

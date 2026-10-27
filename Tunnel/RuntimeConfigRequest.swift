@@ -4,6 +4,18 @@ import Foundation
 /// so they can be exercised by Tests/SelfTest.
 enum RuntimeConfigRequest {
     static let defaultRegion = "tokyo"
+    /// One request, no retries. Generous: from mainland China the API answers in 1-7 s, sometimes 15.
+    static let timeout: TimeInterval = 15
+
+    /// The device token to send: the one the app mirrors into the App Group (always the freshest, it follows
+    /// renewals), else the one saved in the tunnel configuration at the last Connect (an app updated from 1.2
+    /// that has not run yet has no mirror).
+    static func token(appGroup: String?, saved: String?) -> String? {
+        for candidate in [appGroup, saved] {
+            if let token = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty { return token }
+        }
+        return nil
+    }
 
     /// Region ids are compared case-insensitively (same rule as RegionPolicy in the app target).
     static func isDefault(region: String) -> Bool { region.lowercased() == defaultRegion }

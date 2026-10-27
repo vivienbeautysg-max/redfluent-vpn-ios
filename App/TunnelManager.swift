@@ -119,11 +119,7 @@ final class TunnelManager: ObservableObject {
             // region back by itself, then stop and wait until the tunnel is really down.
             let manager = try await loadOrCreateConfiguredManager(onDemand: false)
             manager.connection.stopVPNTunnel()
-            var waited = 0
-            while waited < 50, manager.connection.status != .disconnected, manager.connection.status != .invalid {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                waited += 1
-            }
+            await Self.waitUntilDown(manager.connection)
         } catch {
             lastError = error.localizedDescription
             status = .failed
@@ -156,23 +152,58 @@ final class TunnelManager: ObservableObject {
         serverStop = nil
     }
 
-    /// The server signed this device out: stop the tunnel and remove its VPN configuration, so neither on-demand
-    /// nor the switch in iOS Settings can start it again, and delete the device's last good config. The next
-    /// Connect after activating creates the configuration anew.
+    /// Signed out, by the server or by the user: stop the tunnel and remove its VPN configuration, so neither
+    /// on-demand nor the switch in iOS Settings can start it again. Then, with the extension down, delete the
+    /// device's last good config (before that, a fetch still in flight could write it back). The next Connect
+    /// after activating creates the configuration anew.
     func stopForSignOut() async {
         attempts.cancel()
-        LastGoodTunnelConfig.clear()
         do {
             // Never configured: nothing to stop or remove.
-            guard let manager = try await loadManager() else { return }
-            manager.connection.stopVPNTunnel()
-            try await manager.removeFromPreferences()
-            status = .disconnected
+            if let manager = try await loadManager() {
+                if manager.isOnDemandEnabled {
+                    // Off first, or iOS brings the tunnel straight back while it is being stopped.
+                    manager.isOnDemandEnabled = false
+                    manager.onDemandRules = []
+                    try await manager.saveToPreferences()
+                }
+                manager.connection.stopVPNTunnel()
+                await Self.waitUntilDown(manager.connection)
+                try await manager.removeFromPreferences()
+                status = .disconnected
+            }
         } catch {
-            // Could not remove it: at least turn on-demand off (touches only an existing configuration, so no
-            // permission prompt). A start from Settings then asks the server with the signed-out token and is refused.
             lastError = "Could not remove the VPN configuration: \(error.localizedDescription)"
-            await turnOffOnDemand()
+            await disableSavedConfiguration()
+        }
+        LastGoodTunnelConfig.clear()
+    }
+
+    /// Removal failed: keep the configuration but make it unusable (no on-demand, disabled, no device token).
+    /// With the App Group copy gone too, a start from Settings has no token and the extension refuses it.
+    /// Touches only an existing configuration, so no permission prompt.
+    private func disableSavedConfiguration() async {
+        do {
+            guard let manager = try await loadManager() else { return }
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = []
+            manager.isEnabled = false
+            if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol {
+                proto.providerConfiguration?["token"] = nil
+                manager.protocolConfiguration = proto
+            }
+            try await manager.saveToPreferences()
+        } catch {
+            lastError = (lastError.map { $0 + " " } ?? "") + "Could not disable it: \(error.localizedDescription)"
+        }
+    }
+
+    /// Wait until the tunnel is really down, at most 5 s.
+    private static func waitUntilDown(_ connection: NEVPNConnection) async {
+        var waited = 0
+        while waited < 50, connection.status != .disconnected, connection.status != .invalid {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
         }
     }
 

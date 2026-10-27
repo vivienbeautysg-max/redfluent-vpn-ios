@@ -34,9 +34,9 @@ struct RedFluentVPNApp: App {
                     guard expired, tunnelManager.status.isConnected else { return }
                     Task { await tunnelManager.disconnect() }
                 }
-                .onChange(of: appState.signedOut) { _, signedOut in
-                    // The server signed this device out: stop the tunnel and drop its saved credentials too.
-                    guard signedOut else { return }
+                .onChange(of: appState.signOutCount) { _, _ in
+                    // Signed out, by the server or by the user: stop the tunnel, remove its configuration and
+                    // the device's saved config. One place for both paths.
                     Task { await tunnelManager.stopForSignOut() }
                 }
                 .task {

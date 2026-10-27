@@ -11,6 +11,8 @@ enum SharedContainer {
     static let startErrorFileName = "start-error.json"
     /// Must stay identical to LastGoodTunnelConfig.fileName in the app target.
     static let lastGoodFileName = "last-good-config.json"
+    /// Must stay identical to DeviceTokenMirror.fileName in the app target.
+    static let deviceTokenFileName = "device-token"
 
     static var containerURL: URL? {
         FileManager.default
@@ -148,13 +150,13 @@ enum SharedContainer {
               let at = record["fetchedAt"] as? Double, at.isFinite,
               let region = record["region"] as? String, !region.isEmpty,
               let object = record["runtimeConfig"] as? [String: Any],
-              let config = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+              let config = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
         return LastGood(config: config, region: region, serverRegion: record["serverRegion"] as? String,
                         fetchedAt: Date(timeIntervalSince1970: at))
     }
 
     /// Keep `config` as this device's last good one. Atomic; readable from the first unlock after boot, so an
-    /// on-demand start while the phone is locked can still use it. False when it could not be written.
+    /// on-demand start while the phone is locked can still use it; not in backups. False when it could not be written.
     @discardableResult
     static func writeLastGood(config: Data, region: String, serverRegion: String?, at: Date = Date()) -> Bool {
         guard let url = lastGoodURL,
@@ -162,8 +164,18 @@ enum SharedContainer {
         else { return false }
         do {
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            return false
+        }
+        do {
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var target = url
+            try target.setResourceValues(values)
             return true
         } catch {
+            // Credentials never stay in a file that a backup would carry off.
+            try? FileManager.default.removeItem(at: url)
             return false
         }
     }
@@ -175,5 +187,22 @@ enum SharedContainer {
     static func clearLastGood() {
         guard let url = lastGoodURL else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    // MARK: Device token (written by the app, see DeviceTokenMirror)
+
+    static var deviceTokenURL: URL? {
+        containerURL?.appendingPathComponent(deviceTokenFileName)
+    }
+
+    /// The token text, nil when absent or blank.
+    static func decodeDeviceToken(_ data: Data?) -> String? {
+        guard let data, let text = String(data: data, encoding: .utf8) else { return nil }
+        let token = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : token
+    }
+
+    static func readDeviceToken() -> String? {
+        decodeDeviceToken(deviceTokenURL.flatMap { try? Data(contentsOf: $0) })
     }
 }

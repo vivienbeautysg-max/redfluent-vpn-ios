@@ -23,6 +23,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastFollowCheckAt = Date.distantPast
     /// The region the running engine was configured for.
     private var activeRegionID = RuntimeConfigRequest.defaultRegion
+    /// The raw config (sorted keys, before the clash API) the running engine was started with.
+    private var runningConfig: Data?
+    /// Set once the tunnel is told to stop (any reason): from then on nothing is saved as last good.
+    private var stopRequested = false
     #endif
 
     // Clash API endpoint injected into the sing-box config at boot.
@@ -63,6 +67,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("stopTunnel reason=\(reason.rawValue)")
         SharedContainer.clearActiveRegion()
         #if HAS_LIBBOX
+        followLock.withLock { stopRequested = true }
         await stopFollowing()
         if let poller = statsPoller {
             await poller.stop()
@@ -89,7 +94,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     #if HAS_LIBBOX
     private func startWithLibbox() async throws {
         // 1. Resolve config — per-device from backend, else this device's last good one (see loadConfig).
-        let configContent = try await loadConfig()
+        let loaded = try await loadConfig()
 
         // 2. Compute paths in extension's own sandbox container (no App Group needed)
         guard let containerURL = FileManager.default
@@ -134,8 +139,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // 5. Start the actual sing-box service with our config
         let overrideOptions = LibboxOverrideOptions()
-        try server.startOrReloadService(configContent, options: overrideOptions)
+        try server.startOrReloadService(loaded.content, options: overrideOptions)
         logger.info("sing-box service started")
+        // The engine runs it: only now may a freshly fetched config become the last good one.
+        followLock.withLock { runningConfig = loaded.raw }
+        if let fetched = loaded.fetched {
+            keepLastGood(loaded.raw, region: fetched.region, serverRegion: fetched.serverRegion)
+        }
 
         // 6. Write an immediate "connected" snapshot so the UI reflects state
         //    without waiting for the first poll tick (~2s later).
@@ -161,10 +171,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         startFollowing()
     }
 
-    private func loadConfig() async throws -> String {
+    /// The config the engine is about to start with.
+    private struct LoadedConfig {
+        /// With the clash API injected: what the engine gets.
+        let content: String
+        /// Raw (sorted keys, no clash API): what is saved as last good.
+        let raw: Data
+        /// Set when `raw` was fetched just now (not the saved one): the region it is for.
+        let fetched: (region: String, serverRegion: String?)?
+    }
+
+    private func loadConfig() async throws -> LoadedConfig {
         // Only a config the server issued to this device (its own uuid, so revoking it server-side cuts the
         // tunnel): the one fetched now or, server unreachable, the last good one. No shared fallback config.
-        // The rules are StartPolicy (pure, covered by SelfTest).
+        // The rules are StartPolicy (pure, covered by SelfTest). Nothing is saved here: see startWithLibbox.
         let region = requestedRegion
         let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         let detail = fetched.failure ?? "no response"
@@ -178,15 +198,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let active = fetched.echoedRegion ?? region
             activeRegionID = active
             SharedContainer.writeActiveRegion(id: active, name: fetched.serverRegion ?? active.capitalized)
-            keepLastGood(perDevice, region: active, serverRegion: fetched.serverRegion)
-            return try injectClashAPI(into: perDevice)
+            return LoadedConfig(content: try injectClashAPI(into: perDevice), raw: perDevice,
+                                fetched: (region: active, serverRegion: fetched.serverRegion))
         case .useLastGood:
             guard let lastGood else { break }
             let hours = Int(Date().timeIntervalSince(lastGood.fetchedAt) / 3600)
             logger.warning("server unreachable (\(detail, privacy: .public)); using the last good config, \(hours)h old")
             activeRegionID = lastGood.region
             SharedContainer.writeActiveRegion(id: lastGood.region, name: lastGood.serverRegion ?? lastGood.region.capitalized)
-            return try injectClashAPI(into: lastGood.config)
+            return LoadedConfig(content: try injectClashAPI(into: lastGood.config), raw: lastGood.config, fetched: nil)
         case .refuse(let code, let message, let clearsLastGood):
             if clearsLastGood { SharedContainer.clearLastGood() }
             logger.warning("not connecting: \(message, privacy: .public) (\(detail, privacy: .public))")
@@ -196,8 +216,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                       userInfo: [NSLocalizedDescriptionKey: StartPolicy.unreachableMessage])
     }
 
-    /// Save the raw config (before the clash API goes in) as this device's last good one.
+    /// Save the raw config (before the clash API goes in) as this device's last good one. Only for a config the
+    /// engine runs, and never once the tunnel has been told to stop (sign-out, server stop): the app clears the
+    /// saved config after the stop, and nothing may write it back.
     private func keepLastGood(_ config: Data, region: String, serverRegion: String?) {
+        guard !followLock.withLock({ stopRequested }) else { return }
         if !SharedContainer.writeLastGood(config: config, region: region, serverRegion: serverRegion) {
             logger.warning("could not save the last good config")
         }
@@ -229,12 +252,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         var failure: String?
     }
 
-    /// Fetch this device's sing-box config from the backend, using the token the app passed via
-    /// providerConfiguration. On any failure `data` is nil and `outcome` / `failure` say why (StartPolicy at
-    /// start, FollowPolicy while connected).
+    /// Fetch this device's sing-box config from the backend, with the freshest device token (the app's App Group
+    /// copy, else the one in providerConfiguration). On any failure `data` is nil and `outcome` / `failure` say
+    /// why (StartPolicy at start, FollowPolicy while connected).
     private func fetchPerDeviceConfigData(region: String, serverDecides: Bool) async -> RuntimeConfigFetch {
         let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-        guard let token = cfg?["token"] as? String, !token.isEmpty,
+        guard let token = RuntimeConfigRequest.token(appGroup: SharedContainer.readDeviceToken(),
+                                                     saved: cfg?["token"] as? String),
               let base = cfg?["apiBase"] as? String else {
             return RuntimeConfigFetch(outcome: .notActivated, failure: "device not activated")
         }
@@ -245,7 +269,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 8
+        req.timeoutInterval = RuntimeConfigRequest.timeout
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
@@ -270,7 +294,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             logger.info("using per-device config from backend")
             let echoed = obj["region"] as? String
-            return RuntimeConfigFetch(data: try JSONSerialization.data(withJSONObject: rc),
+            return RuntimeConfigFetch(data: try JSONSerialization.data(withJSONObject: rc, options: [.sortedKeys]),
                                       serverRegion: obj["serverRegion"] as? String,
                                       echoedRegion: echoed,
                                       outcome: .config(region: echoed))
@@ -347,12 +371,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let region = requestedRegion
         let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         guard !Task.isCancelled, commandServer != nil else { return }
-        if let data = fetched.data {
-            keepLastGood(data, region: fetched.echoedRegion ?? region, serverRegion: fetched.serverRegion)
-        }
         switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome) {
         case .keep:
             logger.info("region follow (\(reason, privacy: .public)): kept; \(fetched.failure ?? "no change", privacy: .public)")
+            // Same config as the running engine: refresh the saved one's time (keeps it inside the 30 days).
+            if StartPolicy.refreshesLastGood(fetched: fetched.data, running: followLock.withLock({ runningConfig })),
+               let data = fetched.data {
+                keepLastGood(data, region: fetched.echoedRegion ?? region, serverRegion: fetched.serverRegion)
+            }
         case .reload(let region):
             reloadEngine(fetched, region: region)
         case .stop(let kind):
@@ -372,6 +398,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             activeRegionID = region
             SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
             logger.info("region follow: engine reloaded for \(region, privacy: .public)")
+            // The engine runs it now: it becomes the last good config.
+            followLock.withLock { runningConfig = data }
+            keepLastGood(data, region: region, serverRegion: fetched.serverRegion)
         } catch {
             // The old engine is gone and the new one did not start: stop visibly instead of limping.
             let message = "Could not switch region: \(error.localizedDescription)"
@@ -386,6 +415,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// and stop the tunnel.
     private func stopForServer(_ kind: StopKind) {
         logger.warning("region follow: server says \(kind.rawValue, privacy: .public); stopping the tunnel")
+        followLock.withLock { stopRequested = true }
         SharedContainer.clearLastGood()
         SharedContainer.writeStopReason(kind)
         cancelTunnelWithError(NSError(domain: "rfv.tunnel", code: kind == .expired ? 403 : 401,
