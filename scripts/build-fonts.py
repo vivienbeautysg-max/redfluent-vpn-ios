@@ -19,6 +19,9 @@ Usage (fontTools: pip3 install --user fonttools):
   curl -fsSL -o $SRC/IBMPlexMono-OFL.txt "$B/ibmplexmono/OFL.txt"
   python3 scripts/build-fonts.py $SRC App/Fonts
 
+The last step gives the Fraunces cuts tabular figures (see tabular_figures). On fonts already in App/Fonts:
+  python3 scripts/build-fonts.py --tabular-figures App/Fonts
+
 The PostScript names written here must match App/AppFonts.swift (scripts/selftest.sh checks that).
 """
 import os
@@ -121,9 +124,83 @@ def main(src, out):
         print(f"{filename}: copied unchanged")
     for source, target in LICENSES:
         shutil.copyfile(os.path.join(src, source), os.path.join(out, target))
+    tabular_figures(out)
+
+
+# Fraunces has no 'tnum' feature, so SwiftUI's monospacedDigit() cannot reach tabular figures in it, and a changing
+# number (speed, ping, GB, the quota field) would shift sideways. Its static cuts are given tabular figures instead:
+# every digit gets the widest digit's advance with its outline centred in it, and kerning pairs that touch a digit
+# are zeroed. Idempotent. Archivo has 'tnum' and needs nothing; IBM Plex Mono is monospaced.
+TABULAR_CUTS = ["FrauncesRF-Display.ttf", "FrauncesRF-Text.ttf"]
+DIGITS = "0123456789"
+
+
+def make_digits_tabular(font):
+    cmap = font.getBestCmap()
+    names = [cmap[ord(c)] for c in DIGITS]
+    hmtx, glyf = font["hmtx"], font["glyf"]
+    width = max(hmtx[n][0] for n in names)
+    shifts = {}
+    for n in names:
+        advance, _ = hmtx[n]
+        dx = (width - advance) // 2
+        glyph = glyf[n]
+        if dx:
+            if glyph.isComposite():
+                for component in glyph.components:
+                    component.x += dx
+            elif glyph.numberOfContours > 0:
+                glyph.coordinates.translate((dx, 0))
+            glyph.recalcBounds(glyf)
+            shifts[n] = dx
+        hmtx[n] = (width, getattr(glyph, "xMin", 0))
+    # Glyphs built from a digit (fractions, superiors) keep their own look.
+    for name in glyf.keys():
+        glyph = glyf[name]
+        if name in names or not glyph.isComposite():
+            continue
+        moved = [c for c in glyph.components if c.glyphName in shifts]
+        for component in moved:
+            component.x -= shifts[component.glyphName]
+        if moved:
+            glyph.recalcBounds(glyf)
+            hmtx[name] = (hmtx[name][0], glyph.xMin)
+    zeroed = 0
+    if "GPOS" in font:
+        digits = set(names)
+        for lookup in font["GPOS"].table.LookupList.Lookup:
+            for sub in lookup.SubTable:
+                sub = getattr(sub, "ExtSubTable", sub)
+                if getattr(sub, "LookupType", lookup.LookupType) != 2:
+                    continue
+                if sub.Format == 1:
+                    for first, pairs in zip(sub.Coverage.glyphs, sub.PairSet):
+                        for record in pairs.PairValueRecord:
+                            if (first in digits or record.SecondGlyph in digits) and record.Value1 \
+                                    and getattr(record.Value1, "XAdvance", 0):
+                                record.Value1.XAdvance = 0
+                                zeroed += 1
+                elif sub.Format == 2:
+                    classed = set(sub.ClassDef1.classDefs) | set(sub.ClassDef2.classDefs)
+                    if digits & classed:
+                        raise SystemExit("class kerning on a digit: not handled, check the font")
+    return width, len(shifts), zeroed
+
+
+def tabular_figures(out):
+    for filename in TABULAR_CUTS:
+        path = os.path.join(out, filename)
+        font = TTFont(path)
+        width, moved, zeroed = make_digits_tabular(font)
+        font.save(path)
+        print(f"{filename}: tabular figures, advance {width}, {moved} digits centred, {zeroed} kerning pairs zeroed")
 
 
 if __name__ == "__main__":
+    # --tabular-figures <dir>: apply only that step to fonts already built in <dir> (no sources needed).
+    if len(sys.argv) == 3 and sys.argv[1] == "--tabular-figures":
+        tabular_figures(sys.argv[2])
+        sys.exit(0)
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     main(sys.argv[1], sys.argv[2])
