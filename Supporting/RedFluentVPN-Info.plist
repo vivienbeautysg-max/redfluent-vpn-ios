@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>RedFluent VPN</string>
+	<string>Redfluent VPN</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIconName</key>
@@ -31,6 +31,16 @@
     </string>
 	<key>QuotaEndpointURL</key>
 	<string>https://vpn-api.redfluent.com/device/quota</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>FrauncesRF-Display.ttf</string>
+		<string>FrauncesRF-Text.ttf</string>
+		<string>ArchivoRF-Regular.ttf</string>
+		<string>ArchivoRF-Medium.ttf</string>
+		<string>ArchivoRF-SemiBold.ttf</string>
+		<string>IBMPlexMono-Regular.ttf</string>
+		<string>IBMPlexMono-Medium.ttf</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

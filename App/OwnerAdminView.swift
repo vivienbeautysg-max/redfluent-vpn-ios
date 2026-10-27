@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 @MainActor
 final class OwnerAdminViewModel: ObservableObject {
@@ -13,10 +12,32 @@ final class OwnerAdminViewModel: ObservableObject {
     /// lastUsedAt by profileId; empty when the backend does not report it.
     @Published var lastUsed: [String: DeviceLastUsed] = [:]
     @Published var activationEvents: [OwnerActivationEvent] = []
+    /// Recently Deleted (GET /owner/invites/deleted). Hidden on a backend without it (404).
+    @Published var deleted: [DeletedInvite] = []
+    @Published var deletedSupported = false
+    @Published var deletedError: String?
     @Published var isLoading = false
     @Published var errorMessage: String?
 
+    /// This app's own device: its invite is the owner's (the old fixed owner code was rotated away, but is
+    /// still recognised).
+    var ownProfileId: String?
+    private static let legacyOwnerCode = "RF-OWNER-2026"
+
     private let api = APIClient.shared
+
+    var ownerCodes: Set<String> {
+        var codes: Set<String> = [Self.legacyOwnerCode]
+        if let own = devices.first(where: { $0.profileId == ownProfileId })?.inviteCode { codes.insert(own) }
+        return codes
+    }
+
+    var people: [Person] {
+        PeopleDirectory.people(invites: invites, access: inviteAccess, devices: devices, usage: usage,
+                               lastUsed: lastUsed, ownerCodes: ownerCodes)
+    }
+
+    func person(code: String) -> Person? { people.first { $0.code == code } }
 
     func refresh(token: String) async {
         #if DEBUG
@@ -24,9 +45,12 @@ final class OwnerAdminViewModel: ObservableObject {
             invites = ScreenshotMode.ownerInvites
             inviteAccess = ScreenshotMode.ownerInviteAccess
             devices = ScreenshotMode.ownerDevices
-            usage = ScreenshotMode.hidesUsage ? [:] : ScreenshotMode.ownerUsage
+            usage = ScreenshotMode.ownerUsage
             usagePeriod = ScreenshotMode.ownerPeriod
             lastUsed = ScreenshotMode.ownerLastUsed()
+            activationEvents = ScreenshotMode.ownerEvents
+            deleted = ScreenshotMode.ownerDeleted()
+            deletedSupported = true
             return
         }
         #endif
@@ -48,10 +72,31 @@ final class OwnerAdminViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+        await refreshDeleted(token: token)
         isLoading = false
     }
 
-    /// Saves an invite change. nil on success, otherwise the server's reason (shown inside the sheet).
+    /// 404 = older backend: the entry stays hidden and nothing is reported. Any other failure keeps the entry and
+    /// shows the reason on the Recently Deleted page.
+    func refreshDeleted(token: String) async {
+        #if DEBUG
+        if ScreenshotMode.isOn { return }
+        #endif
+        do {
+            deleted = try await api.fetchDeletedInvites(token: token)
+            deletedSupported = true
+            deletedError = nil
+        } catch where RecentlyDeleted.isUnsupported(error) {
+            deletedSupported = false
+            deleted = []
+            deletedError = nil
+        } catch {
+            deletedSupported = true
+            deletedError = error.localizedDescription
+        }
+    }
+
+    /// Saves a change. nil on success, otherwise the server's reason.
     func updateInvite(_ body: [String: JSONValue], token: String) async -> String? {
         do {
             _ = try await api.updateOwnerInvite(body: body, token: token)
@@ -73,62 +118,6 @@ final class OwnerAdminViewModel: ObservableObject {
         }
     }
 
-    func deleteInvite(_ invite: OwnerInvite, token: String) async -> Bool {
-        do {
-            _ = try await api.deleteOwnerInvite(invite, token: token)
-            invites.removeAll { $0.code == invite.code }
-            devices.removeAll { $0.inviteCode == invite.code }
-            errorMessage = nil
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
-    func renameDevice(_ device: OwnerDevice, displayName: String, token: String) async {
-        do {
-            let updated = try await api.renameOwnerDevice(
-                profileId: device.profileId,
-                displayName: displayName,
-                token: token
-            )
-            if let idx = devices.firstIndex(where: { $0.profileId == updated.profileId }) {
-                devices[idx] = updated
-            }
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func revokeDevice(_ device: OwnerDevice, token: String) async -> Bool {
-        do {
-            let updated = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
-            if let idx = devices.firstIndex(where: { $0.profileId == updated.profileId }) {
-                devices[idx] = updated
-            }
-            if let inviteIdx = invites.firstIndex(where: { $0.code == updated.inviteCode }) {
-                let invite = invites[inviteIdx]
-                invites[inviteIdx] = OwnerInvite(
-                    code: invite.code,
-                    label: invite.label,
-                    maxDevices: invite.maxDevices,
-                    activeDevices: max(0, invite.activeDevices - 1),
-                    monthlyQuotaGB: invite.monthlyQuotaGB,
-                    enabled: invite.enabled,
-                    expiresAt: invite.expiresAt,
-                    createdAt: invite.createdAt
-                )
-            }
-            errorMessage = nil
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
     func refreshDevices(token: String) async {
         do {
             let result = try await api.fetchOwnerDevices(token: token)
@@ -141,962 +130,382 @@ final class OwnerAdminViewModel: ObservableObject {
         }
     }
 
-    /// Signs out every device of a user (all invites carrying that label); the invites stay valid. Uses
-    /// POST /owner/users/logout. A backend that does not have it answers 404, and then each enabled device is
-    /// signed out with the per-device revoke the backend always had. True when everything worked; failures show
-    /// in the error banner.
-    func logOutUser(codes: [String], token: String) async -> Bool {
-        errorMessage = nil
-        var ok = true
-        for code in codes {
-            do {
-                _ = try await api.logoutOwnerUser(code: code, token: token)
-            } catch where LogoutPlan.needsFallback(error) {
-                for device in LogoutPlan.fallbackTargets(devices: devices, codes: [code]) {
-                    do {
-                        _ = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
-                    } catch {
-                        errorMessage = error.localizedDescription
-                        ok = false
-                    }
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                ok = false
-            }
+    /// nil on success, otherwise the reason.
+    func deleteInvite(_ invite: OwnerInvite, token: String) async -> String? {
+        do {
+            _ = try await api.deleteOwnerInvite(invite, token: token)
+        } catch {
+            return error.localizedDescription
+        }
+        invites.removeAll { $0.code == invite.code }
+        devices.removeAll { $0.inviteCode == invite.code }
+        await refreshDeleted(token: token)
+        return nil
+    }
+
+    /// nil on success, otherwise what to say (404 / 409 / 403 have their own short texts).
+    func restore(_ invite: DeletedInvite, token: String) async -> String? {
+        do {
+            try await api.restoreInvite(code: invite.code, token: token)
+        } catch {
+            return RecentlyDeleted.restoreMessage(error)
+        }
+        await refreshInvites(token: token)
+        await refreshDevices(token: token)
+        await refreshDeleted(token: token)
+        return nil
+    }
+
+    func renameDevice(_ device: OwnerDevice, displayName: String, token: String) async -> String? {
+        do {
+            _ = try await api.renameOwnerDevice(profileId: device.profileId, displayName: displayName, token: token)
+        } catch {
+            return error.localizedDescription
+        }
+        await refreshDevices(token: token)
+        return nil
+    }
+
+    func revokeDevice(_ device: OwnerDevice, token: String) async -> String? {
+        do {
+            _ = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
+        } catch {
+            return error.localizedDescription
         }
         await refreshDevices(token: token)
         await refreshInvites(token: token)
-        return ok
+        return nil
     }
+
+    /// Signs out every device of an invite (the invite stays valid). Uses POST /owner/users/logout; a backend
+    /// without it answers 404, and then each enabled device is signed out with the per-device revoke.
+    /// nil when everything worked, otherwise the (last) reason.
+    func logOutAll(code: String, token: String) async -> String? {
+        var failure: String?
+        do {
+            _ = try await api.logoutOwnerUser(code: code, token: token)
+        } catch where LogoutPlan.needsFallback(error) {
+            for device in LogoutPlan.fallbackTargets(devices: devices, codes: [code]) {
+                do {
+                    _ = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
+                } catch {
+                    failure = error.localizedDescription
+                }
+            }
+        } catch {
+            failure = error.localizedDescription
+        }
+        await refreshDevices(token: token)
+        await refreshInvites(token: token)
+        return failure
+    }
+}
+
+enum AdminRoute: Hashable {
+    case person(String)
+    case deleted
+}
+
+private enum AdminTab: String, CaseIterable, Identifiable {
+    case people = "People", events = "Events"
+    var id: String { rawValue }
 }
 
 struct OwnerAdminView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = OwnerAdminViewModel()
+    @State private var tab: AdminTab = .people
+    @State private var path: [AdminRoute] = []
     @State private var showingCreateInvite = false
-    @State private var inviteToEdit: OwnerInvite?
-    @State private var deviceToRename: OwnerDevice?
-    @State private var expandedUsers: Set<String> = []
-    @State private var deviceToLogOut: UsageRow?
-    @State private var userToLogOutAll: UsageGroup?
 
     var body: some View {
-        NavigationStack {
-            List {
-                if let error = model.errorMessage {
-                    Section {
+        NavigationStack(path: $path) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    BarRow(title: "Owner Admin") {
+                        BarButton(title: "Done", bold: true) { dismiss() }
+                    } trailing: {
+                        HStack(spacing: 20) {
+                            iconButton("arrow.clockwise", label: "Refresh") { Task { await refresh() } }
+                            iconButton("plus", label: "New invite") { showingCreateInvite = true }
+                        }
+                    }
+                    header
+                    tabs
+                    if let error = model.errorMessage {
                         Text(error)
-                            .font(Theme.Font.caption)
-                            .foregroundStyle(Theme.Color.danger)
+                            .font(Theme.Font.text(13, .medium))
+                            .foregroundStyle(Theme.Color.red)
+                            .padding(.top, 12)
+                    }
+                    switch tab {
+                    case .people: peopleList
+                    case .events: eventsList
                     }
                 }
-
-                Section {
-                    Button { showingCreateInvite = true } label: {
-                        Label("Create invite", systemImage: "plus.circle.fill")
-                    }
-                    .font(Theme.Font.bodyLarge)
-                    .foregroundStyle(Theme.Color.brandPrimary)
-                }
-
-                if !usageGroups.isEmpty {
-                    Section(usageHeader) {
-                        ForEach(usageGroups) { group in
-                            OwnerUsageUserView(
-                                group: group,
-                                now: Date(),
-                                canLogOut: !isOwnerGroup(group),
-                                isExpanded: expansion(of: group),
-                                confirmingDevice: $deviceToLogOut,
-                                confirmingAll: $userToLogOutAll,
-                                onLogOutDevice: logOut,
-                                onLogOutAll: logOutAll
-                            )
-                        }
-                    }
-                }
-
-                Section {
-                    if appState.ownerInvitesExpanded {
-                        if model.invites.isEmpty && !model.isLoading {
-                            Text("No invites yet")
-                                .foregroundStyle(Theme.Color.textSecondary)
-                        }
-                        ForEach(model.invites) { invite in
-                            Button {
-                                inviteToEdit = invite
-                            } label: {
-                                OwnerInviteRow(invite: invite,
-                                               access: model.inviteAccess[invite.code],
-                                               isOwnerInvite: isOwnerInvite(invite))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                } header: {
-                    OwnerSectionHeader(title: OwnerSectionTitle.counted("Invites", model.invites.count),
-                                       isExpanded: $appState.ownerInvitesExpanded)
-                }
-
-                Section {
-                    if appState.ownerActivationExpanded {
-                        if model.activationEvents.isEmpty && !model.isLoading {
-                            Text("No activation attempts recorded yet")
-                                .foregroundStyle(Theme.Color.textSecondary)
-                        }
-                        ForEach(model.activationEvents) { event in
-                            OwnerActivationEventRow(event: event)
-                        }
-                    }
-                } header: {
-                    OwnerSectionHeader(title: OwnerSectionTitle.counted("Activation Events", model.activationEvents.count),
-                                       isExpanded: $appState.ownerActivationExpanded)
-                }
-
-                Section {
-                    if appState.ownerDevicesExpanded {
-                        if model.devices.isEmpty && !model.isLoading {
-                            Text("No activated devices yet")
-                                .foregroundStyle(Theme.Color.textSecondary)
-                        }
-                        ForEach(model.devices) { device in
-                            Button {
-                                deviceToRename = device
-                            } label: {
-                                OwnerDeviceRow(device: device)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                } header: {
-                    OwnerSectionHeader(title: devicesHeader, isExpanded: $appState.ownerDevicesExpanded)
-                }
+                .padding(.horizontal, Theme.gutter)
+                .padding(.bottom, 28)
             }
+            .refreshable { await refresh() }
             .overlay {
-                if model.isLoading {
-                    ProgressView()
-                        .controlSize(.large)
+                if model.isLoading && model.invites.isEmpty {
+                    ProgressView().controlSize(.large).tint(Theme.Color.stone)
                 }
             }
-            .navigationTitle("Owner Admin")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-            }
-            .sheet(isPresented: $showingCreateInvite, onDismiss: {
-                Task { await refresh() }
-            }) {
-                CreateInviteView()
-                    .environmentObject(appState)
-            }
-            .sheet(item: $inviteToEdit) { invite in
-                let access = model.inviteAccess[invite.code]
-                EditInviteView(
-                    invite: invite,
-                    access: access,
-                    isOwnerInvite: isOwnerInvite(invite),
-                    isReviewInvite: isReviewInvite(invite),
-                    regionOptions: InviteRegionOptions.options(ownerRegions: appState.regions, current: access?.region)
-                ) { edit in
-                    guard let token = appState.currentProfile?.token else { return "Not signed in" }
-                    return await model.updateInvite(
-                        InviteBody.update(original: invite, originalAccess: access, edit: edit),
-                        token: token
-                    )
-                } onDelete: {
-                    guard let token = appState.currentProfile?.token else { return false }
-                    return await model.deleteInvite(invite, token: token)
+            .rfPage()
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: AdminRoute.self) { route in
+                switch route {
+                case .person(let code):
+                    PersonView(code: code, model: model)
+                        .environmentObject(appState)
+                case .deleted:
+                    RecentlyDeletedView(model: model)
+                        .environmentObject(appState)
                 }
             }
-
-            .sheet(item: $deviceToRename) { device in
-                ManageDeviceView(device: device) { name in
-                    guard let token = appState.currentProfile?.token else { return }
-                    await model.renameDevice(device, displayName: name, token: token)
-                } onRevoke: {
-                    guard let token = appState.currentProfile?.token else { return false }
-                    return await model.revokeDevice(device, token: token)
-                }
+        }
+        .sheet(isPresented: $showingCreateInvite, onDismiss: { Task { await refresh() } }) {
+            CreateInviteView()
+                .environmentObject(appState)
+                .rfSheet()
+        }
+        .task {
+            await refresh()
+            #if DEBUG
+            if ScreenshotMode.opensEvents { tab = .events }
+            if let name = ScreenshotMode.openPerson, let person = model.people.first(where: { $0.label == name }) {
+                path = [.person(person.code)]
             }
-            .task {
-                await refresh()
-                #if DEBUG
-                if let n = ScreenshotMode.editInviteIndex, model.invites.indices.contains(n - 1) {
-                    inviteToEdit = model.invites[n - 1]
-                }
-                if let label = ScreenshotMode.expandUser, let group = usageGroups.first(where: { $0.label == label }) {
-                    expandedUsers.insert(group.id)
-                }
-                if ScreenshotMode.expandsInvites { appState.ownerInvitesExpanded = true }
-                if ScreenshotMode.expandsActivationEvents { appState.ownerActivationExpanded = true }
-                if ScreenshotMode.expandsDevices { appState.ownerDevicesExpanded = true }
-                if let name = ScreenshotMode.confirmLogoutDevice,
-                   let row = usageGroups.flatMap(\.rows).first(where: { $0.displayName == name }) {
-                    deviceToLogOut = row
-                }
-                if let label = ScreenshotMode.confirmLogoutAll, let group = usageGroups.first(where: { $0.label == label }) {
-                    userToLogOutAll = group
-                }
-                #endif
-            }
+            if ScreenshotMode.opensDeleted { path = [.deleted] }
+            #endif
         }
     }
 
-    /// The owner's own invite: its devices include this one. (The old fixed owner code was rotated away.)
-    private var ownerInviteCode: String? {
-        model.devices.first(where: { $0.profileId == appState.currentProfile?.profileId })?.inviteCode
-    }
+    // MARK: - Header
 
-    private func isOwnerInvite(_ invite: OwnerInvite) -> Bool {
-        isOwnerInviteCode(invite.code)
-    }
-
-    private func isOwnerInviteCode(_ code: String) -> Bool {
-        code == ownerInviteCode || code == "RF-OWNER-2026"
-    }
-
-    /// The owner's own devices are never logged out.
-    private func isOwnerGroup(_ group: UsageGroup) -> Bool {
-        group.inviteCodes.contains(where: isOwnerInviteCode)
-    }
-
-    private func expansion(of group: UsageGroup) -> Binding<Bool> {
-        Binding(
-            get: { expandedUsers.contains(group.id) },
-            set: { open in
-                if open { expandedUsers.insert(group.id) } else { expandedUsers.remove(group.id) }
+    private var header: some View {
+        HStack(alignment: .bottom) {
+            DotTitle(text: tab.rawValue, size: 46, dot: .filled)
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                countLine(counts.0, counts.1)
+                countLine(counts.2, counts.3)
             }
-        )
+            .padding(.bottom, 4)
+        }
+        .padding(.top, 14)
     }
 
-    private func logOut(_ row: UsageRow) {
-        guard let token = appState.currentProfile?.token,
-              let device = model.devices.first(where: { $0.profileId == row.id }) else { return }
-        Task { _ = await model.revokeDevice(device, token: token) }
+    /// (n, "online", m, "total") for People; (failed, total) for Events.
+    private var counts: (Int, String, Int, String) {
+        switch tab {
+        case .people:
+            let people = model.people
+            return (people.filter(\.online).count, "online", people.count, "total")
+        case .events:
+            return (model.activationEvents.filter { $0.outcome != "success" }.count, "failed",
+                    model.activationEvents.count, "total")
+        }
     }
 
-    private func logOutAll(_ group: UsageGroup) {
-        guard let token = appState.currentProfile?.token else { return }
-        Task { _ = await model.logOutUser(codes: group.inviteCodes, token: token) }
+    private func countLine(_ n: Int, _ word: String) -> some View {
+        (Text("\(n) ").font(Theme.Font.text(13, .semibold)).foregroundStyle(Theme.Color.ink)
+            + Text(word).font(Theme.Font.text(13, .medium)).foregroundStyle(Theme.Color.stone))
     }
 
-    private func isReviewInvite(_ invite: OwnerInvite) -> Bool {
-        invite.label.trimmingCharacters(in: .whitespaces).lowercased() == "apple review"
+    private var tabs: some View {
+        HStack(spacing: 26) {
+            ForEach(AdminTab.allCases) { option in
+                let on = option == tab
+                Button {
+                    tab = option
+                } label: {
+                    Text(option.rawValue)
+                        .font(Theme.Font.text(15, on ? .semibold : .medium))
+                        .foregroundStyle(on ? Theme.Color.ink : Theme.Color.stone)
+                        .padding(.bottom, 12)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(on ? Theme.Color.red : .clear).frame(height: 2)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            Spacer()
+        }
+        .padding(.top, 20)
+        .overlay(alignment: .bottom) { Rule() }
     }
 
-    private var usageGroups: [UsageGroup] {
-        UsageMetrics.groups(devices: model.devices, usage: model.usage, lastUsed: model.lastUsed)
+    // MARK: - People
+
+    @ViewBuilder
+    private var peopleList: some View {
+        let people = model.people
+        let now = Date()
+        if people.isEmpty && !model.isLoading {
+            Text("No people yet")
+                .font(Theme.Font.text(14))
+                .foregroundStyle(Theme.Color.stone)
+                .padding(.vertical, 18)
+        }
+        ForEach(people) { person in
+            NavigationLink(value: AdminRoute.person(person.code)) {
+                PersonRow(person: person, now: now)
+            }
+            .buttonStyle(.plain)
+        }
+        if model.deletedSupported {
+            NavigationLink(value: AdminRoute.deleted) {
+                HStack(spacing: 10) {
+                    Image(systemName: "trash").font(.system(size: 13, weight: .medium))
+                    Text("Recently Deleted").font(Theme.Font.text(15, .medium))
+                    Spacer()
+                    Text("\(model.deleted.count)").font(Theme.Font.text(14))
+                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(Theme.Color.stone)
+                .frame(minHeight: 52)
+                .contentShape(Rectangle())
+                .overlay(alignment: .bottom) { Rule() }
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+        }
     }
 
-    private var usageHeader: String {
-        if let since = UsageMetrics.periodText(model.usagePeriod) { return "Usage \u{00B7} \(since)" }
-        return "Usage"
+    // MARK: - Events
+
+    @ViewBuilder
+    private var eventsList: some View {
+        if model.activationEvents.isEmpty && !model.isLoading {
+            Text("No activation attempts yet")
+                .font(Theme.Font.text(14))
+                .foregroundStyle(Theme.Color.stone)
+                .padding(.vertical, 18)
+        }
+        ForEach(model.activationEvents) { event in
+            ActivationEventRow(event: event)
+        }
     }
 
-    private var devicesHeader: String {
-        let n = model.devices.filter { ($0.online ?? $0.inUse) && $0.enabled }.count
-        return OwnerSectionTitle.devices(online: n)
+    private func iconButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(Theme.Color.ink)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private func refresh() async {
         guard let token = appState.currentProfile?.token else { return }
+        model.ownProfileId = appState.currentProfile?.profileId
         await model.refresh(token: token)
     }
 }
 
-/// Header of a collapsible Owner Admin section: the title and a chevron; tapping it opens or closes the section.
-private struct OwnerSectionHeader: View {
-    let title: String
-    @Binding var isExpanded: Bool
+/// One person: dot (online) · name · used this period; region · devices · last use; Paused / Expired.
+private struct PersonRow: View {
+    let person: Person
+    let now: Date
 
     var body: some View {
-        Button {
-            withAnimation { isExpanded.toggle() }
-        } label: {
-            HStack {
-                Text(title)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+        HStack(alignment: .top, spacing: 11) {
+            Circle()
+                .fill(person.online ? Theme.Color.red : .clear)
+                .overlay(Circle().strokeBorder(person.online ? .clear : Theme.Color.stone, lineWidth: 1.5))
+                .frame(width: 9, height: 9)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(person.label)
+                        .font(Theme.Font.text(16.5, .semibold))
+                        .foregroundStyle(person.paused ? Theme.Color.stone : Theme.Color.ink)
+                        .lineLimit(1)
+                    if person.paused { Tag(text: "Paused", color: Theme.Color.stone) }
+                    Spacer(minLength: 8)
+                    (Text(HomeFormat.gigabytes(person.usedGB)).font(Theme.Font.serif(19))
+                        + Text(" GB").font(Theme.Font.text(11, .medium)).foregroundStyle(Theme.Color.stone))
+                        .foregroundStyle(Theme.Color.ink)
+                        .monospacedDigit()
+                }
+                HStack(spacing: 8) {
+                    Text(person.summary(now: now))
+                        .font(Theme.Font.text(12.5))
+                        .foregroundStyle(Theme.Color.stone)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let status = person.isOwner ? nil : InviteStatusLine.status(person.access) {
+                        if status.tone == .danger {
+                            Tag(text: "Expired")
+                        } else if status.tone == .warning, let left = person.access?.daysLeft {
+                            Text(ISODate.daysPhrase(left))
+                                .font(Theme.Font.text(12, .semibold))
+                                .foregroundStyle(Theme.Color.red)
+                                .fixedSize()
+                        }
+                    }
+                }
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(Theme.Color.textSecondary)
-        .textCase(nil)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) { Rule() }
+        .accessibilityElement(children: .combine)
     }
 }
 
-private struct OwnerActivationEventRow: View {
+private struct ActivationEventRow: View {
     let event: OwnerActivationEvent
 
+    private var success: Bool { event.outcome == "success" }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(primaryCode)
-                        .font(Theme.Font.monoBody)
-                        .foregroundStyle(Theme.Color.textPrimary)
-                    if let matched = event.matchedInviteCode, matched != primaryCode {
-                        Text("Matched: \(matched)")
-                            .font(Theme.Font.caption)
-                            .foregroundStyle(Theme.Color.textSecondary)
-                    }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(primaryCode)
+                    .font(Theme.Font.mono(14, medium: true))
+                    .foregroundStyle(Theme.Color.ink)
+                    .lineLimit(1)
+                Spacer()
+                Tag(text: success ? "Success" : "Failed", color: success ? Theme.Color.stone : Theme.Color.red)
+            }
+            Text("HTTP \(event.httpStatus) \u{00B7} \(event.reason ?? "unknown")")
+                .font(Theme.Font.text(12.5, .medium))
+                .foregroundStyle(success ? Theme.Color.stone : Theme.Color.red)
+            let details = [event.matchedInviteCode.flatMap { $0 == primaryCode ? nil : "Matched \($0)" },
+                           event.deviceName, event.appVersion.map { "v" + $0 },
+                           event.activeDevices.flatMap { a in event.maxDevices.map { "\(a)/\($0) devices" } }]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+            if !details.isEmpty {
+                Text(details.joined(separator: " \u{00B7} "))
+                    .font(Theme.Font.text(12.5))
+                    .foregroundStyle(Theme.Color.stone)
+            }
+            HStack {
+                if let ip = event.remoteIp, !ip.isEmpty {
+                    Text(ip).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.Color.stone)
                 }
                 Spacer()
-                Text(event.outcome == "success" ? "Success" : "Failed")
-                    .font(Theme.Font.micro)
-                    .padding(.horizontal, Theme.Spacing.sm)
-                    .padding(.vertical, Theme.Spacing.xs)
-                    .background(statusColor.opacity(0.14))
-                    .foregroundStyle(statusColor)
-                    .clipShape(Capsule())
-            }
-
-            Text(reasonSummary)
-                .font(Theme.Font.caption)
-                .foregroundStyle(statusColor)
-
-            HStack(spacing: Theme.Spacing.md) {
-                if let deviceName = event.deviceName, !deviceName.isEmpty {
-                    detail("Device", deviceName)
-                }
-                if let appVersion = event.appVersion, !appVersion.isEmpty {
-                    detail("App", appVersion)
-                }
-                if let active = event.activeDevices, let max = event.maxDevices {
-                    detail("Devices", "\(active)/\(max)")
-                }
-            }
-
-            HStack(spacing: Theme.Spacing.md) {
-                if let remoteIp = event.remoteIp, !remoteIp.isEmpty {
-                    detail("IP", remoteIp)
-                }
-                Text(event.createdAtSgt)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.textSecondary)
+                Text(event.createdAtSgt).font(Theme.Font.text(12)).foregroundStyle(Theme.Color.stone)
             }
         }
-        .padding(.vertical, Theme.Spacing.xs)
+        .padding(.vertical, 14)
+        .overlay(alignment: .bottom) { Rule() }
     }
 
     private var primaryCode: String {
-        if let input = event.inviteCodeInput, !input.isEmpty {
-            return input
-        }
-        if let normalized = event.inviteCodeNormalized, !normalized.isEmpty {
-            return normalized
-        }
+        if let input = event.inviteCodeInput, !input.isEmpty { return input }
+        if let normalized = event.inviteCodeNormalized, !normalized.isEmpty { return normalized }
         return "Unknown invite"
-    }
-
-    private var reasonSummary: String {
-        let reason = event.reason ?? "unknown"
-        return "HTTP \(event.httpStatus) - \(reason)"
-    }
-
-    private var statusColor: Color {
-        event.outcome == "success" ? Theme.Color.success : Theme.Color.danger
-    }
-
-    private func detail(_ label: String, _ value: String) -> some View {
-        Text("\(label): \(value)")
-            .font(Theme.Font.caption)
-            .foregroundStyle(Theme.Color.textSecondary)
-    }
-}
-
-private struct OwnerInviteRow: View {
-    let invite: OwnerInvite
-    let access: InviteAccess?
-    let isOwnerInvite: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack {
-                Text(invite.label)
-                    .font(Theme.Font.bodyLarge)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Spacer()
-                Text(invite.enabled ? "Enabled" : "Disabled")
-                    .font(Theme.Font.micro)
-                    .padding(.horizontal, Theme.Spacing.sm)
-                    .padding(.vertical, Theme.Spacing.xs)
-                    .background((invite.enabled ? Theme.Color.success : Theme.Color.danger).opacity(0.14))
-                    .foregroundStyle(invite.enabled ? Theme.Color.success : Theme.Color.danger)
-                    .clipShape(Capsule())
-            }
-            Text(invite.code)
-                .font(Theme.Font.monoBody)
-                .foregroundStyle(Theme.Color.textSecondary)
-            HStack(spacing: Theme.Spacing.md) {
-                metric("Devices", "\(invite.activeDevices)/\(invite.maxDevices)")
-                metric("Monthly", invite.monthlyQuotaGB.map { "\($0) GB" } ?? "Unlimited")
-                if let region = regionName {
-                    metric("Region", region)
-                } else {
-                    metric("Expires", invite.expiresAt ?? "Never")
-                }
-            }
-            .font(Theme.Font.caption)
-            .foregroundStyle(Theme.Color.textSecondary)
-            if !isOwnerInvite, let status = InviteStatusLine.status(access) {
-                Text(status.text)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(status.tone.color)
-            }
-        }
-        .padding(.vertical, Theme.Spacing.xs)
-    }
-
-    /// Shown only where the backend reports regions, and not for the owner invite (it uses all of them).
-    private var regionName: String? {
-        guard !isOwnerInvite, access?.isPresent == true, let region = access?.region else { return nil }
-        return region.capitalized
-    }
-
-    private func metric(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(Theme.Font.micro)
-            Text(value)
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.textPrimary)
-        }
-    }
-}
-
-private struct OwnerDeviceRow: View {
-    let device: OwnerDevice
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack {
-                Circle()
-                    .fill(isOnline ? Theme.Color.success : Theme.Color.textSecondary.opacity(0.35))
-                    .frame(width: 10, height: 10)
-                Text(device.displayName)
-                    .font(Theme.Font.bodyLarge)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                Spacer()
-                Text(isOnline ? "Online" : statusText)
-                    .font(Theme.Font.micro)
-                    .foregroundStyle(isOnline ? Theme.Color.success : Theme.Color.textSecondary)
-            }
-            Text(device.profileId)
-                .font(Theme.Font.monoBody)
-                .foregroundStyle(Theme.Color.textSecondary)
-            HStack(spacing: Theme.Spacing.md) {
-                Text(device.inviteLabel ?? device.inviteCode)
-                if let appVersion = device.appVersion {
-                    Text(appVersion)
-                }
-                if let conns = device.lastActiveConnections {
-                    Text("\(conns) conns")
-                }
-            }
-            .font(Theme.Font.caption)
-            .foregroundStyle(Theme.Color.textSecondary)
-        }
-        .padding(.vertical, Theme.Spacing.xs)
-    }
-
-    private var isOnline: Bool { device.online ?? device.inUse }
-
-    private var statusText: String {
-        if !device.enabled { return "Revoked" }
-        if let last = device.lastHeartbeatAt { return "Seen \(displayServerTime(last))" }
-        if let last = device.lastSeenAt { return "Activated \(displayServerTime(last))" }
-        return "Inactive"
-    }
-}
-
-/// One user of the Usage list: label, total used, last use. Tapping it opens the device list.
-private struct OwnerUsageUserView: View {
-    let group: UsageGroup
-    let now: Date
-    /// False for the owner's own invite: its devices are never logged out.
-    let canLogOut: Bool
-    @Binding var isExpanded: Bool
-    /// The device / user whose Log out confirmation is open (the dialogs hang off the buttons that asked).
-    @Binding var confirmingDevice: UsageRow?
-    @Binding var confirmingAll: UsageGroup?
-    let onLogOutDevice: (UsageRow) -> Void
-    let onLogOutAll: (UsageGroup) -> Void
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            ForEach(group.rows) { row in
-                OwnerUsageDeviceView(
-                    row: row,
-                    reported: group.lastUsedReported,
-                    now: now,
-                    canLogOut: canLogOut && row.enabled,
-                    isConfirming: Binding(
-                        get: { confirmingDevice?.id == row.id },
-                        set: { if !$0, confirmingDevice?.id == row.id { confirmingDevice = nil } }
-                    ),
-                    onAskLogOut: { confirmingDevice = row },
-                    onLogOut: { onLogOutDevice(row) }
-                )
-            }
-            if canLogOut, group.activeDevices > 0 {
-                Button(role: .destructive) {
-                    confirmingAll = group
-                } label: {
-                    Label("Log out all devices", systemImage: "rectangle.portrait.and.arrow.right")
-                        .foregroundStyle(Theme.Color.danger)
-                }
-                .confirmationDialog(
-                    LogoutPlan.allTitle(count: group.activeDevices, label: group.label),
-                    isPresented: Binding(
-                        get: { confirmingAll?.id == group.id },
-                        set: { if !$0, confirmingAll?.id == group.id { confirmingAll = nil } }
-                    ),
-                    titleVisibility: .visible
-                ) {
-                    Button("Log out", role: .destructive) { onLogOutAll(group) }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text(LogoutPlan.allMessage)
-                }
-            }
-        } label: {
-            header
-        }
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(group.label)
-                    .font(Theme.Font.bodyLarge)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: Theme.Spacing.sm)
-                Text(UsageFormat.total(group.totalGB))
-                    .font(Theme.Font.body)
-                    .fontWeight(.semibold)
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.Color.textPrimary)
-            }
-            HStack(spacing: 6) {
-                if group.online {
-                    Circle().fill(Theme.Color.success).frame(width: 8, height: 8)
-                }
-                statusText
-                    .font(Theme.Font.caption)
-            }
-        }
-        .padding(.vertical, Theme.Spacing.xs)
-    }
-
-    /// "Online · 2 devices" / "Last used 2h ago · 1 device" / "Never · 1 device".
-    private var statusText: Text {
-        let activity = ActivityText.text(online: group.online, lastUsedAt: group.lastUsedAt,
-                                         reported: group.lastUsedReported, now: now)
-        let devices = Text(group.devicesText).foregroundStyle(Theme.Color.textSecondary)
-        guard let activity else { return devices }
-        let first = Text(activity).foregroundStyle(group.online ? Theme.Color.success : Theme.Color.textSecondary)
-        return first + Text(" \u{00B7} ").foregroundStyle(Theme.Color.textSecondary) + devices
-    }
-}
-
-private struct OwnerUsageDeviceView: View {
-    let row: UsageRow
-    let reported: Bool
-    let now: Date
-    let canLogOut: Bool
-    @Binding var isConfirming: Bool
-    let onAskLogOut: () -> Void
-    let onLogOut: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if row.online {
-                    Circle().fill(Theme.Color.success).frame(width: 8, height: 8)
-                }
-                Text(row.displayName)
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: Theme.Spacing.sm)
-                Text(row.amountText)
-                    .font(Theme.Font.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.Color.textSecondary)
-            }
-            if let detail = row.detail {
-                Text(detail)
-                    .font(Theme.Font.micro)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .lineLimit(1)
-            }
-            if let fraction = row.fraction, let percentText = row.percentText {
-                HStack(spacing: Theme.Spacing.sm) {
-                    UsageBar(fraction: fraction, color: row.level.color)
-                    Text(percentText)
-                        .font(Theme.Font.micro)
-                        .monospacedDigit()
-                        .foregroundStyle(row.level == .critical ? Theme.Color.danger : Theme.Color.textSecondary)
-                        .frame(width: 48, alignment: .trailing)
-                }
-            }
-            HStack {
-                if let activity = ActivityText.text(online: row.online, lastUsedAt: row.lastUsedAt,
-                                                    reported: reported, now: now) {
-                    Text(activity)
-                        .font(Theme.Font.micro)
-                        .foregroundStyle(row.online ? Theme.Color.success : Theme.Color.textSecondary)
-                }
-                Spacer(minLength: Theme.Spacing.sm)
-                if canLogOut {
-                    Button("Log out", action: onAskLogOut)
-                        .font(Theme.Font.caption)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(Theme.Color.danger)
-                        .confirmationDialog(
-                            LogoutPlan.deviceTitle(row.displayName),
-                            isPresented: $isConfirming,
-                            titleVisibility: .visible
-                        ) {
-                            Button("Log out", role: .destructive, action: onLogOut)
-                            Button("Cancel", role: .cancel) {}
-                        } message: {
-                            Text(LogoutPlan.deviceMessage)
-                        }
-                } else if !row.enabled {
-                    Text("Signed out")
-                        .font(Theme.Font.micro)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                }
-            }
-        }
-        .opacity(row.enabled ? 1 : 0.55)
-    }
-}
-
-/// Capsule bar drawn directly so track and fill read the same in light and dark mode.
-private struct UsageBar: View {
-    let fraction: Double
-    let color: Color
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color(.tertiarySystemFill))
-                Capsule()
-                    .fill(color)
-                    .frame(width: fraction > 0 ? max(geo.size.width * fraction, 6) : 0)
-            }
-        }
-        .frame(height: 8)
-    }
-}
-
-private extension UsageLevel {
-    var color: Color {
-        switch self {
-        case .ok:       return Theme.Color.success
-        case .warning:  return Theme.Color.warning
-        case .critical: return Theme.Color.danger
-        }
-    }
-}
-
-private let serverUTCFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.calendar = Calendar(identifier: .gregorian)
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return formatter
-}()
-
-private let sgtFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.calendar = Calendar(identifier: .gregorian)
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(identifier: "Asia/Singapore")
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'SGT'"
-    return formatter
-}()
-
-private func displayServerTime(_ raw: String) -> String {
-    guard let date = serverUTCFormatter.date(from: raw) else {
-        return raw
-    }
-    return sgtFormatter.string(from: date)
-}
-
-private struct EditInviteView: View {
-    let invite: OwnerInvite
-    let access: InviteAccess?
-    let isOwnerInvite: Bool
-    let isReviewInvite: Bool
-    let regionOptions: [VPNRegion]
-    let onSave: (InviteEdit) async -> String?
-    let onDelete: () async -> Bool
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var code: String
-    @State private var label: String
-    @State private var maxDevices: Int
-    @State private var monthlyQuotaGB: Int
-    @State private var enabled: Bool
-    @State private var region: String
-    @State private var accessChoice: AccessChoice
-    @State private var isSaving = false
-    @State private var isDeleting = false
-    @State private var showingDeleteConfirm = false
-    @State private var saveError: String?
-
-    init(
-        invite: OwnerInvite,
-        access: InviteAccess?,
-        isOwnerInvite: Bool,
-        isReviewInvite: Bool,
-        regionOptions: [VPNRegion],
-        onSave: @escaping (InviteEdit) async -> String?,
-        onDelete: @escaping () async -> Bool
-    ) {
-        self.invite = invite
-        self.access = access
-        self.isOwnerInvite = isOwnerInvite
-        self.isReviewInvite = isReviewInvite
-        self.regionOptions = regionOptions
-        self.onSave = onSave
-        self.onDelete = onDelete
-        _code = State(initialValue: invite.code)
-        _label = State(initialValue: invite.label)
-        _maxDevices = State(initialValue: invite.maxDevices)
-        _monthlyQuotaGB = State(initialValue: invite.monthlyQuotaGB ?? 200)
-        _enabled = State(initialValue: invite.enabled)
-        let current = access?.region ?? RegionPolicy.defaultID
-        _region = State(initialValue: regionOptions.first(where: { RegionPolicy.matches($0.id, current) })?.id ?? current)
-        _accessChoice = State(initialValue: AccessChoice(durationDays: access?.durationDays))
-    }
-
-    /// Region and Access only where the backend reports them, never for the owner invite; the Apple Review
-    /// invite takes a region but no duration (the server refuses one).
-    private var showsAccessControls: Bool { access?.isPresent == true && !isOwnerInvite }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Invite") {
-                    TextField("Code", text: $code)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(isOwnerInvite)
-                    TextField("Label", text: $label)
-                    Stepper("Device limit: \(maxDevices)", value: $maxDevices, in: 1...100)
-                    Stepper("Monthly limit: \(monthlyQuotaGB) GB", value: $monthlyQuotaGB, in: 1...2000, step: 50)
-                    Toggle("Enabled", isOn: $enabled)
-                }
-                if showsAccessControls {
-                    Section {
-                        InviteAccessRows(
-                            region: $region,
-                            access: $accessChoice,
-                            regionOptions: regionOptions,
-                            showsAccess: !isReviewInvite,
-                            status: isReviewInvite ? nil : InviteStatusLine.status(access)
-                        )
-                    }
-                }
-                if isOwnerInvite {
-                    Section {
-                        Text("The owner invite is protected and cannot be renamed or deleted.")
-                            .font(Theme.Font.caption)
-                            .foregroundStyle(Theme.Color.textSecondary)
-                    }
-                } else {
-                    Section {
-                        Button(role: .destructive) {
-                            showingDeleteConfirm = true
-                        } label: {
-                            if isDeleting {
-                                ProgressView()
-                            } else {
-                                Label("Delete invite", systemImage: "trash")
-                            }
-                        }
-                        .disabled(isDeleting || isSaving)
-                    }
-                }
-                if let saveError {
-                    Section {
-                        Text(saveError)
-                            .font(Theme.Font.caption)
-                            .foregroundStyle(Theme.Color.danger)
-                    }
-                }
-            }
-            .navigationTitle("Edit Invite")
-            .confirmationDialog(
-                "Delete invite?",
-                isPresented: $showingDeleteConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Delete Invite", role: .destructive) {
-                    isDeleting = true
-                    Task {
-                        let ok = await onDelete()
-                        isDeleting = false
-                        if ok { dismiss() }
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This removes the invite from Owner Admin and revokes devices created from it.")
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        save()
-                    } label: {
-                        if isSaving { ProgressView() } else { Text("Save") }
-                    }
-                    .disabled(isSaving || isDeleting || trimmedCode.isEmpty || label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-
-    private func save() {
-        isSaving = true
-        saveError = nil
-        let edit = InviteEdit(
-            code: trimmedCode,
-            label: label.trimmingCharacters(in: .whitespacesAndNewlines),
-            maxDevices: maxDevices,
-            monthlyQuotaGB: monthlyQuotaGB,
-            enabled: enabled,
-            region: showsAccessControls ? region : nil,
-            access: showsAccessControls && !isReviewInvite ? accessChoice : nil
-        )
-        Task {
-            let error = await onSave(edit)
-            isSaving = false
-            if let error { saveError = error } else { dismiss() }
-        }
-    }
-
-    private var trimmedCode: String {
-        code.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-private struct ManageDeviceView: View {
-    let device: OwnerDevice
-    let onSave: (String) async -> Void
-    let onRevoke: () async -> Bool
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var displayName: String
-    @State private var isSaving = false
-    @State private var isRevoking = false
-    @State private var showingRevokeConfirm = false
-
-    init(
-        device: OwnerDevice,
-        onSave: @escaping (String) async -> Void,
-        onRevoke: @escaping () async -> Bool
-    ) {
-        self.device = device
-        self.onSave = onSave
-        self.onRevoke = onRevoke
-        _displayName = State(initialValue: device.displayName)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Device") {
-                    TextField("Display name", text: $displayName)
-                    LabeledContent("Profile", value: device.profileId)
-                    LabeledContent("Invite", value: device.inviteLabel ?? device.inviteCode)
-                    LabeledContent("Status", value: device.inUse ? "In use" : "Not active")
-                }
-                if isOwnerDevice {
-                    Section {
-                        Text("Owner devices are protected so you cannot lock yourself out of Owner Admin.")
-                            .font(Theme.Font.caption)
-                            .foregroundStyle(Theme.Color.textSecondary)
-                    }
-                } else {
-                    Section {
-                        Button(role: .destructive) {
-                            showingRevokeConfirm = true
-                        } label: {
-                            if isRevoking {
-                                ProgressView()
-                            } else {
-                                Label("Revoke device", systemImage: "xmark.shield")
-                            }
-                        }
-                        .disabled(isSaving || isRevoking || !device.enabled)
-                    }
-                }
-            }
-            .navigationTitle("Manage Device")
-            .confirmationDialog(
-                "Revoke device?",
-                isPresented: $showingRevokeConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Revoke Device", role: .destructive) {
-                    isRevoking = true
-                    Task {
-                        let ok = await onRevoke()
-                        isRevoking = false
-                        if ok { dismiss() }
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This disables VPN access for this device and frees one slot on its invite.")
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        isSaving = true
-                        Task {
-                            await onSave(displayName.trimmingCharacters(in: .whitespacesAndNewlines))
-                            isSaving = false
-                            dismiss()
-                        }
-                    } label: {
-                        if isSaving { ProgressView() } else { Text("Save") }
-                    }
-                    .disabled(isSaving || displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-
-    private var isOwnerDevice: Bool {
-        device.inviteCode == "RF-OWNER-2026"
     }
 }
 

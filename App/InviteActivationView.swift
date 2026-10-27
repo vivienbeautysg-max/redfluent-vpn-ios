@@ -2,135 +2,86 @@ import SwiftUI
 
 struct InviteActivationView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
     @State private var inviteCode: String = ""
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
-        ZStack {
-            backgroundGradient
+        GeometryReader { geo in
+            let compact = geo.size.height < 700
             ScrollView {
-                VStack(spacing: Theme.Spacing.lg) {
-                    Spacer(minLength: Theme.Spacing.xxl)
-                    logo
-                    headline
-                    Spacer(minLength: Theme.Spacing.lg)
-                    activationCard
-                    if FeatureFlags.appleSignInEnabled {
-                        appleRecoverSection
+                VStack(alignment: .leading, spacing: 0) {
+                    Wordmark()
+                        .frame(height: 50)
+                    LandingArt(landed: false, height: compact ? 150 : 200, showsPower: false)
+                        .padding(.horizontal, -Theme.gutter)
+                        .padding(.top, compact ? 0 : 12)
+                    DotTitle(text: "Invite code", size: compact ? 44 : 50, dot: .filled)
+                        .padding(.top, compact ? 10 : 20)
+                    if appState.signedOut {
+                        Label(SignedOut.notice, systemImage: "rectangle.portrait.and.arrow.right")
+                            .font(Theme.Font.text(14, .semibold))
+                            .foregroundStyle(Theme.Color.red)
+                            .padding(.top, 12)
                     }
-                    privacyFootnote
-                    Spacer(minLength: Theme.Spacing.lg)
+                    TextField("", text: $inviteCode, prompt: Text("RF-XXXX-XXXX").foregroundStyle(Theme.Color.stone))
+                        .font(Theme.Font.mono(20, medium: true))
+                        .foregroundStyle(Theme.Color.ink)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($fieldFocused)
+                        .submitLabel(.go)
+                        .onSubmit { redeem() }
+                        .padding(.vertical, 14)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(fieldFocused ? Theme.Color.ink : Theme.Color.rule).frame(height: fieldFocused ? 1.5 : 1)
+                        }
+                        .padding(.top, compact ? 16 : 26)
+                        .accessibilityLabel("Invite code")
+                    if let err = appState.lastActivationError {
+                        Text(err)
+                            .font(Theme.Font.text(13, .medium))
+                            .foregroundStyle(Theme.Color.red)
+                            .padding(.top, 10)
+                    }
+                    Button {
+                        redeem()
+                    } label: {
+                        if isBusy {
+                            ProgressView().tint(Theme.Color.onRed)
+                        } else {
+                            Text("Activate")
+                        }
+                    }
+                    .buttonStyle(PrimaryButtonStyle(enabled: !isBusy))
+                    .disabled(isBusy)
+                    .padding(.top, 22)
+                    if FeatureFlags.appleSignInEnabled {
+                        appleRecoverSection.padding(.top, 18)
+                    }
+                    footer
+                        .padding(.top, 28)
                 }
-                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.horizontal, Theme.gutter)
+                .padding(.bottom, 20)
             }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .onAppear { fieldFocused = true }
-    }
-
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [Theme.Color.brandPrimary, Theme.Color.brandSecondary],
-            startPoint: .topLeading, endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
-    }
-
-    private var logo: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .frame(width: 96, height: 96)
-            Text("RF")
-                .font(.system(size: 38, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.Color.textOnBrand)
-        }
-        .shadow(color: .black.opacity(0.15), radius: 14, x: 0, y: 6)
-    }
-
-    private var headline: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Text("RedFluent VPN")
-                .font(Theme.Font.displayLarge)
-                .foregroundStyle(Theme.Color.textOnBrand)
-            Text("Private secure tunnel for trusted devices")
-                .font(Theme.Font.bodyLarge)
-                .foregroundStyle(Theme.Color.textOnBrand.opacity(0.85))
-                .multilineTextAlignment(.center)
+        .rfPage()
+        .onAppear {
+            #if DEBUG
+            if ScreenshotMode.isOn { return }   // screenshots: no keyboard over the page
+            #endif
+            fieldFocused = true
         }
     }
 
-    private var activationCard: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            if appState.signedOut {
-                Label(SignedOut.notice, systemImage: "rectangle.portrait.and.arrow.right")
-                    .font(Theme.Font.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Theme.Color.textPrimary)
-            }
-            Text("Enter your invite code")
-                .font(Theme.Font.titleLarge)
-                .foregroundStyle(Theme.Color.textPrimary)
-
-            Text("RedFluent VPN is private invite-only software. Each device receives its own revocable profile.")
-                .font(Theme.Font.body)
-                .foregroundStyle(Theme.Color.textSecondary)
-
-            TextField("Invite code", text: $inviteCode)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(Theme.Font.monoBody)
-                .padding(.horizontal, Theme.Spacing.md)
-                .padding(.vertical, Theme.Spacing.md)
-                .background(Theme.Color.surfaceElevated)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous))
-                .focused($fieldFocused)
-                .submitLabel(.go)
-                .onSubmit { redeem() }
-
-            if let err = appState.lastActivationError {
-                Text(err)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Color.danger)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            activationButton
-        }
-        .padding(Theme.Spacing.lg)
-        .background(.ultraThickMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg, style: .continuous))
-        .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 8)
-    }
-
-    private var activationButton: some View {
-        Button {
-            redeem()
-        } label: {
-            HStack {
-                if case .activating = appState.activation {
-                    ProgressView().tint(Theme.Color.textOnBrand)
-                } else {
-                    Text("Activate")
-                        .font(.headline)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, Theme.Spacing.md)
-            .background(Theme.Color.brandPrimary)
-            .foregroundStyle(Theme.Color.textOnBrand)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
-        }
-        .disabled(isBusy)
-    }
-
-    // 换了手机的人走这条：不用再回去找 owner 要邀请码。
+    // For someone on a new phone: no need to ask the owner for the code again.
     private var appleRecoverSection: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Text("换了手机？")
-                .font(Theme.Font.caption)
-                .foregroundStyle(Theme.Color.textOnBrand.opacity(0.85))
+        VStack(alignment: .leading, spacing: 8) {
+            Text("New phone").rfLabelStyle()
             AppleRecoverButton(
-                onLightBackground: false,
+                onLightBackground: colorScheme != .dark,
                 onToken: { token in
                     Task { await appState.recoverWithApple(identityToken: token) }
                 },
@@ -139,17 +90,17 @@ struct InviteActivationView: View {
                 }
             )
         }
-        .padding(.horizontal, Theme.Spacing.sm)
     }
 
-    private var privacyFootnote: some View {
-        HStack(spacing: Theme.Spacing.lg) {
+    private var footer: some View {
+        HStack(spacing: 22) {
             Link("Privacy", destination: URL(string: "https://www.redfluent.com/privacy")!)
-            Link("Terms",   destination: URL(string: "https://www.redfluent.com/terms")!)
+            Link("Terms", destination: URL(string: "https://www.redfluent.com/terms")!)
             Link("Support", destination: URL(string: "https://www.redfluent.com/support")!)
         }
-        .font(Theme.Font.caption)
-        .foregroundStyle(Theme.Color.textOnBrand.opacity(0.85))
+        .font(Theme.Font.text(13, .medium))
+        .foregroundStyle(Theme.Color.stone)
+        .tint(Theme.Color.stone)
     }
 
     private var isBusy: Bool {

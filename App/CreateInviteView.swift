@@ -8,7 +8,7 @@ struct CreateInviteView: View {
     @State private var code = ""
     @State private var label = ""
     @State private var maxDevices = 1
-    @State private var monthlyQuotaGB = 200
+    @State private var quotaText = "200"
     @State private var region = RegionPolicy.defaultID
     @State private var access = AccessChoice()
     /// Does the backend know about region / access? Asked once; older backends do not, and then the controls stay hidden.
@@ -17,81 +17,99 @@ struct CreateInviteView: View {
     @State private var errorMessage: String?
     @State private var isCreating = false
     @State private var copied = false
+    @FocusState private var quotaFocused: Bool
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("New Invite") {
-                    TextField("Invite code", text: $code)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(Theme.Font.monoBody)
-                    TextField("Label (optional)", text: $label)
-                        .textInputAutocapitalization(.words)
-                    Stepper("Device limit: \(maxDevices)", value: $maxDevices, in: 1...100)
-                    Stepper("Monthly limit: \(monthlyQuotaGB) GB", value: $monthlyQuotaGB, in: 1...2000, step: 50)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                BarRow(title: "") {
+                    BarButton(title: createdInvite == nil ? "Cancel" : "Done") { dismiss() }
+                } trailing: {
+                    if isCreating {
+                        ProgressView().tint(Theme.Color.stone)
+                    } else {
+                        BarButton(title: "Create", bold: true, enabled: canCreate) { createInvite() }
+                    }
                 }
+                DotTitle(text: "New invite", size: 46, dot: .filled)
+                    .padding(.top, 14)
 
+                SectionLabel(text: "Invite").padding(.top, 26).padding(.bottom, 2)
+                Rule()
+                SettingRow(label: "Code") {
+                    ThemedField(placeholder: "RF-XXXX-XXXX", text: $code, mono: true)
+                }
+                SettingRow(label: "Name") {
+                    ThemedField(placeholder: "Optional", text: $label)
+                }
+                QuotaField(text: $quotaText, focused: $quotaFocused)
+                SettingRow(label: "Device limit") {
+                    NumberStepper(value: $maxDevices, range: PersonDraft.deviceLimit)
+                }
                 if supportsAccess {
-                    Section {
-                        InviteAccessRows(
-                            region: $region,
-                            access: $access,
-                            regionOptions: InviteRegionOptions.options(ownerRegions: appState.regions, current: nil)
-                        )
-                    }
-                }
-
-                if let createdInvite {
-                    Section("Created") {
-                        LabeledContent("Code", value: createdInvite.code)
-                            .font(Theme.Font.monoBody)
-                        LabeledContent("Label", value: createdInvite.label)
-                        LabeledContent("Device limit", value: "\(createdInvite.maxDevices)")
-                        LabeledContent("Monthly limit", value: "\(createdInvite.monthlyQuotaGB) GB")
-                        if supportsAccess {
-                            LabeledContent("Region", value: RegionPolicy.name(of: region, in: InviteRegionOptions.options(ownerRegions: appState.regions, current: region)))
-                            LabeledContent("Access", value: access.summary)
-                        } else {
-                            LabeledContent("Expires", value: "Never")
-                        }
-                        Button {
-                            UIPasteboard.general.string = createdInvite.code
-                            copied = true
-                        } label: {
-                            Label(copied ? "Copied" : "Copy code", systemImage: "doc.on.doc")
-                        }
-                        ShareLink("Share code", item: createdInvite.code)
-                    }
+                    InviteAccessRows(
+                        region: $region,
+                        access: $access,
+                        regionOptions: InviteRegionOptions.options(ownerRegions: appState.regions, current: nil)
+                    )
                 }
 
                 if let errorMessage {
-                    Section {
-                        Text(errorMessage)
-                            .foregroundStyle(Theme.Color.danger)
-                    }
+                    Text(errorMessage)
+                        .font(Theme.Font.text(13, .medium))
+                        .foregroundStyle(Theme.Color.red)
+                        .padding(.top, 14)
+                }
+
+                if let createdInvite {
+                    created(createdInvite)
                 }
             }
-            .navigationTitle("Create Invite")
-            .task { await probeAccessSupport() }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        createInvite()
-                    } label: {
-                        if isCreating {
-                            ProgressView()
-                        } else {
-                            Text("Create")
-                        }
-                    }
-                    .disabled(isCreating || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
+            .padding(.horizontal, Theme.gutter)
+            .padding(.bottom, 32)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .rfPage()
+        .task { await probeAccessSupport() }
+    }
+
+    private func created(_ invite: CreatedInvite) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Created").padding(.top, 28).padding(.bottom, 10)
+            Text(invite.code)
+                .font(Theme.Font.mono(22, medium: true))
+                .foregroundStyle(Theme.Color.ink)
+                .textSelection(.enabled)
+            Text([invite.label,
+                  "\(invite.maxDevices) device" + (invite.maxDevices == 1 ? "" : "s"),
+                  "\(invite.monthlyQuotaGB) GB",
+                  supportsAccess ? RegionPolicy.name(of: region, in: InviteRegionOptions.options(ownerRegions: appState.regions, current: region)) : nil,
+                  supportsAccess ? access.summary : nil]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " \u{00B7} "))
+                .font(Theme.Font.text(13))
+                .foregroundStyle(Theme.Color.stone)
+                .padding(.top, 6)
+            HStack(spacing: 10) {
+                Button {
+                    UIPasteboard.general.string = invite.code
+                    copied = true
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(OutlineButtonStyle())
+                ShareLink(item: invite.code) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(OutlineButtonStyle())
+            }
+            .padding(.top, 14)
+        }
+    }
+
+    private var canCreate: Bool {
+        !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (try? QuotaInput.parse(quotaText).get()) != nil
     }
 
     private func probeAccessSupport() async {
@@ -108,24 +126,22 @@ struct CreateInviteView: View {
 
     private func createInvite() {
         guard let profile = appState.currentProfile else {
-            errorMessage = "No active profile"
+            errorMessage = "Not signed in"
             return
         }
         let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCode.isEmpty else {
-            errorMessage = "Invite code is required"
-            return
-        }
+        guard !trimmedCode.isEmpty, case .success(let quota) = QuotaInput.parse(quotaText) else { return }
 
         isCreating = true
         errorMessage = nil
         copied = false
+        quotaFocused = false
         let body = InviteBody.create(
             code: trimmedCode,
             label: trimmedLabel.isEmpty ? nil : trimmedLabel,
             maxDevices: maxDevices,
-            monthlyQuotaGB: monthlyQuotaGB,
+            monthlyQuotaGB: quota,
             region: supportsAccess ? region : nil,
             access: supportsAccess ? access : nil
         )

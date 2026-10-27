@@ -8,6 +8,8 @@ struct RedFluentVPNApp: App {
     @StateObject private var quotaStore = QuotaStore()
     /// When the app last reconnected by itself after a server stop (at most once in 30 minutes).
     @State private var lastAutoReconnect = Date.distantPast
+    /// Light unless the user picked dark in the "…" menu; never follows the system.
+    @AppStorage(Appearance.storageKey) private var appearanceRaw = Appearance.light.rawValue
 
     var body: some Scene {
         WindowGroup {
@@ -16,7 +18,8 @@ struct RedFluentVPNApp: App {
                 .environmentObject(tunnelManager)
                 .environmentObject(statsStore)
                 .environmentObject(quotaStore)
-                .preferredColorScheme(nil)
+                .preferredColorScheme(Appearance.from(appearanceRaw).colorScheme)
+                .tint(Theme.Color.red)
                 .onChange(of: appState.selectedRegionID) { _, _ in
                     // Any change of the selection (picker, or a server-side reset): reconnect when
                     // connected, otherwise keep the saved tunnel configuration in step with it.
@@ -38,10 +41,13 @@ struct RedFluentVPNApp: App {
                 }
                 .task {
                     #if DEBUG
+                    FontCheck.runIfRequested()   // -RFVFontSelfTest: prints and exits, after UIKit registered UIAppFonts
                     if ScreenshotMode.isOn {
                         let now = Date()
-                        tunnelManager.status = .connected   // 让 Live Traffic 卡片展示真实的已连接形态
-                        statsStore.snapshot = ScreenshotMode.stats(now: now)
+                        // -RFVDisconnected: the disconnected home screen; otherwise connected with live numbers.
+                        ScreenshotMode.stageActiveRegion(connected: !ScreenshotMode.startsDisconnected)
+                        tunnelManager.status = ScreenshotMode.startsDisconnected ? .disconnected : .connected
+                        statsStore.snapshot = ScreenshotMode.startsDisconnected ? nil : ScreenshotMode.stats(now: now)
                         quotaStore.injectForScreenshot(ScreenshotMode.quota(now: now))
                         return
                     }

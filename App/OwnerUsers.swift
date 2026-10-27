@@ -76,5 +76,5 @@ enum OwnerSectionTitle {
 
 enum SignedOut {
     /// Shown on the activation screen when the server signed this device out.
-    static let notice = "Signed out. Enter your invite code to reconnect."
+    static let notice = "Signed out"
 }

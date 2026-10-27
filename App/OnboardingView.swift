@@ -1,93 +1,61 @@
 import SwiftUI
 
+/// Three quiet pages: the red dot comes down onto the line, one word each. No explanations.
 struct OnboardingView: View {
     @Binding var done: Bool
     @State private var page = 0
 
-    private let slides: [Slide] = [
-        Slide(
-            symbol: "paperplane.fill",
-            title: "RedFluent VPN",
-            body: "A private secure tunnel built for trusted devices. Not a public service."
-        ),
-        Slide(
-            symbol: "checkmark.shield.fill",
-            title: "Invite only",
-            body: "Each device gets its own revocable profile. No public signup, no advertising."
-        ),
-        Slide(
-            symbol: "lock.fill",
-            title: "Privacy first",
-            body: "Your traffic is encrypted between this device and RedFluent infrastructure. We do not sell data."
-        )
-    ]
+    private let titles = ["Redfluent VPN", "Invite only", "Private"]
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Theme.Color.brandPrimary, Theme.Color.brandSecondary],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-
-            VStack(spacing: 0) {
+        GeometryReader { geo in
+            let compact = geo.size.height < 700
+            VStack(alignment: .leading, spacing: 0) {
+                Wordmark()
+                    .frame(height: 50)
+                    .padding(.horizontal, Theme.gutter)
+                Spacer(minLength: 0)
+                LandingArt(landed: page == titles.count - 1, glowing: page == titles.count - 1,
+                           height: compact ? 190 : 236, showsPower: false)
+                Spacer(minLength: 0)
                 TabView(selection: $page) {
-                    ForEach(Array(slides.enumerated()), id: \.offset) { idx, slide in
-                        slideView(slide).tag(idx)
+                    ForEach(titles.indices, id: \.self) { i in
+                        DotTitle(text: titles[i], size: compact ? 44 : 50, dot: .filled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, Theme.gutter)
+                            .tag(i)
                     }
                 }
-                .tabViewStyle(.page(indexDisplayMode: .always))
-                .indexViewStyle(.page(backgroundDisplayMode: .always))
-
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .frame(height: compact ? 70 : 80)
+                HStack(spacing: 8) {
+                    ForEach(titles.indices, id: \.self) { i in
+                        Capsule()
+                            .fill(i == page ? Theme.Color.red : Theme.Color.rule)
+                            .frame(width: i == page ? 22 : 8, height: 8)
+                    }
+                }
+                .padding(.horizontal, Theme.gutter)
+                .padding(.top, 14)
+                .animation(.easeInOut(duration: 0.25), value: page)
+                .accessibilityHidden(true)
                 Button {
-                    if page < slides.count - 1 {
+                    if page < titles.count - 1 {
                         withAnimation { page += 1 }
                     } else {
                         UserDefaults.standard.set(true, forKey: "rfv.onboardingDone")
                         withAnimation { done = true }
                     }
                 } label: {
-                    Text(page < slides.count - 1 ? "Next" : "Get started")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, Theme.Spacing.md)
-                        .background(.ultraThinMaterial)
-                        .foregroundStyle(Theme.Color.textOnBrand)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
+                    Text(page < titles.count - 1 ? "Next" : "Get started")
                 }
-                .padding(.horizontal, Theme.Spacing.lg)
-                .padding(.bottom, Theme.Spacing.xl)
+                .buttonStyle(PrimaryButtonStyle())
+                .padding(.horizontal, Theme.gutter)
+                .padding(.top, compact ? 22 : 34)
+                .padding(.bottom, compact ? 16 : 28)
             }
         }
-    }
-
-    private func slideView(_ slide: Slide) -> some View {
-        VStack(spacing: Theme.Spacing.lg) {
-            Spacer()
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .frame(width: 180, height: 180)
-                Image(systemName: slide.symbol)
-                    .font(.system(size: 72, weight: .light))
-                    .foregroundStyle(Theme.Color.textOnBrand)
-            }
-            Text(slide.title)
-                .font(Theme.Font.displayLarge)
-                .foregroundStyle(Theme.Color.textOnBrand)
-            Text(slide.body)
-                .font(Theme.Font.bodyLarge)
-                .foregroundStyle(Theme.Color.textOnBrand.opacity(0.85))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, Theme.Spacing.xl)
-            Spacer()
-        }
-    }
-
-    private struct Slide {
-        let symbol: String
-        let title: String
-        let body: String
+        .rfPage()
     }
 }
 

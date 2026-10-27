@@ -35,7 +35,7 @@ struct AppleRecoverButton: View {
                       let data = credential.identityToken,
                       let token = String(data: data, encoding: .utf8)
                 else {
-                    onError("Apple 没有返回身份凭证，请再试一次")
+                    onError("Apple ID returned no sign-in token. Try again.")
                     return
                 }
                 onToken(token)
@@ -47,6 +47,6 @@ struct AppleRecoverButton: View {
         }
         .signInWithAppleButtonStyle(onLightBackground ? .black : .white)
         .frame(height: 46)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
+        .clipShape(Capsule())
     }
 }

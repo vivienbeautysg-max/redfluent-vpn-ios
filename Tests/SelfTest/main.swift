@@ -1,4 +1,5 @@
 import Foundation
+import CoreText
 
 // Self-test for the multi-region + usage logic. Compiled by scripts/selftest.sh against the
 // real source files (App/Regions.swift, App/UsageMetrics.swift, App/APIClient.swift,
@@ -781,7 +782,7 @@ check(LogoutPlan.deviceTitle("Alice iPhone") == "Log out Alice iPhone?" && Logou
       "device confirmation text")
 check(LogoutPlan.allTitle(count: 3, label: "Alice") == "Log out all 3 devices of Alice?" && LogoutPlan.allTitle(count: 1, label: "Ben") == "Log out 1 device of Ben?",
       "log out all confirmation text")
-check(SignedOut.notice == "Signed out. Enter your invite code to reconnect.", "landing notice text")
+check(SignedOut.notice == "Signed out", "landing notice text (no explanation)")
 
 section("25. collapsible Owner Admin section titles")
 
@@ -790,6 +791,269 @@ check(OwnerSectionTitle.counted("Activation Events", 0) == "Activation Events \u
 check(OwnerSectionTitle.counted("Activation Events", 80) == "Activation Events \u{00B7} 80", "Activation Events · 80")
 check(OwnerSectionTitle.devices(online: 2) == "Devices \u{00B7} 2 online", "Devices · 2 online")
 check(OwnerSectionTitle.devices(online: 0) == "Devices", "no device online -> just Devices")
+
+// MARK: 26. Soft Landing: monthly quota input
+
+section("26. monthly quota: any whole number 1-2000, quick values")
+
+check(QuotaInput.parse("48") == .success(48), "\"48\" -> 48")
+check(QuotaInput.parse("  48 ") == .success(48), "surrounding spaces are ignored")
+check(QuotaInput.parse("048") == .success(48), "a leading zero is fine")
+check(QuotaInput.parse("1") == .success(1) && QuotaInput.parse("2000") == .success(2000), "1 and 2000 are the limits")
+check(QuotaInput.parse("") == .failure(.empty) && QuotaInput.parse("   ") == .failure(.empty), "empty -> empty")
+check(QuotaInput.parse("0") == .failure(.outOfRange), "0 -> out of range")
+check(QuotaInput.parse("2001") == .failure(.outOfRange), "2001 -> out of range")
+check(QuotaInput.parse("99999999999999999999999") == .failure(.outOfRange), "a huge number (Int overflow) -> out of range, no crash")
+check(QuotaInput.parse("48.5") == .failure(.notWholeNumber), "\"48.5\" -> not a whole number")
+check(QuotaInput.parse("48,5") == .failure(.notWholeNumber) && QuotaInput.parse("48.") == .failure(.notWholeNumber),
+      "\"48,5\" / \"48.\" -> not a whole number")
+check(QuotaInput.parse("abc") == .failure(.notANumber), "letters -> not a number")
+check(QuotaInput.parse("4 8") == .failure(.notANumber) && QuotaInput.parse("-5") == .failure(.notANumber)
+      && QuotaInput.parse("1.2.3") == .failure(.notANumber) && QuotaInput.parse("50GB") == .failure(.notANumber),
+      "\"4 8\" / \"-5\" / \"1.2.3\" / \"50GB\" -> not a number")
+check(QuotaInput.parse("\u{FF14}\u{FF18}") == .failure(.notANumber), "full-width digits are not taken as a number")
+check(QuotaInput.presets == [10, 50, 100, 200], "quick values 10 / 50 / 100 / 200")
+check(QuotaInput.presets.allSatisfy { QuotaInput.parse(String($0)) == .success($0) }, "every quick value is itself valid")
+check(QuotaInput.Problem.outOfRange.message == "1\u{2013}2000 GB" && QuotaInput.Problem.notWholeNumber.message == "Whole GB only",
+      "short messages")
+
+// The person page sends the typed quota in the full six-field update.
+let quotaInvite = try! JSONDecoder().decode(OwnerInvite.self, from: Data(#"{"code":"RF-Q","label":"Quinn","maxDevices":2,"activeDevices":1,"monthlyQuotaGB":200,"enabled":true}"#.utf8))
+var quotaDraft = PersonDraft(invite: quotaInvite, access: nil, regionOptions: [.tokyo])
+check(quotaDraft.quotaText == "200" && quotaDraft.maxDevices == 2 && quotaDraft.enabled, "draft starts from the invite")
+quotaDraft.quotaText = "48"
+if let edit = quotaDraft.edit(showsRegion: false, showsAccess: false) {
+    let body = InviteBody.update(original: quotaInvite, originalAccess: nil, edit: edit)
+    check(Set(body.keys) == ["code", "newCode", "label", "maxDevices", "monthlyQuotaGB", "enabled"], "all six fields are sent")
+    check(body["monthlyQuotaGB"] == .int(48) && body["code"] == .string("RF-Q") && body["newCode"] == .string("RF-Q")
+          && body["label"] == .string("Quinn") && body["maxDevices"] == .int(2) && body["enabled"] == .bool(true),
+          "48 GB goes out with the other five fields unchanged")
+} else { check(false, "a valid draft produced no edit") }
+quotaDraft.quotaText = "48.5"
+check(quotaDraft.edit(showsRegion: false, showsAccess: false) == nil, "an invalid quota cannot be saved")
+quotaDraft.quotaText = "48"
+quotaDraft.enabled = false
+check(quotaDraft.edit(showsRegion: false, showsAccess: false)?.enabled == false, "Paused = enabled false")
+quotaDraft.label = "  "
+check(quotaDraft.edit(showsRegion: false, showsAccess: false) == nil, "an empty name cannot be saved")
+let unlimitedInvite = try! JSONDecoder().decode(OwnerInvite.self, from: Data(#"{"code":"RF-U","label":"U","maxDevices":1,"activeDevices":0,"monthlyQuotaGB":null,"enabled":true}"#.utf8))
+let unlimitedDraft = PersonDraft(invite: unlimitedInvite, access: nil, regionOptions: [.tokyo])
+check(unlimitedDraft.quotaText == "" && unlimitedDraft.edit(showsRegion: false, showsAccess: false) == nil,
+      "no quota on record: the field starts empty and nothing is saved until one is typed (no silent default)")
+
+// MARK: 27. IPv6 entry display
+
+section("27. IPv6 entry: shared /64 half faint, device half dark, IPv4 only")
+
+func v6(_ text: String?) -> IPv6Display { IPv6Display.make(text) }
+check(v6("2001:db8:1000:5bd7:b463:af04:5e51:58ef") == .address(prefix: "2001:db8:1000:5bd7:", host: "b463:af04:5e51:58ef"),
+      "full address splits after the fourth group")
+check(v6("2001:DB8:1000:5BD7:B463:AF04:5E51:58EF") == .address(prefix: "2001:db8:1000:5bd7:", host: "b463:af04:5e51:58ef"), "lower-cased")
+check(v6("2001:0db8:1000:05bd7:1:2:3:4") == .address(prefix: "", host: "2001:0db8:1000:05bd7:1:2:3:4"), "a 5-digit group is not an address -> shown as is")
+check(v6("2001:0db8:0100:5bd7:0001:0002:0003:0004") == .address(prefix: "2001:db8:100:5bd7:", host: "1:2:3:4"), "leading zeros dropped")
+check(v6("2001:db8:1000:5bd7::1") == .address(prefix: "2001:db8:1000:5bd7:", host: ":1"), "compressed device half")
+if case let .address(p, h) = v6("2001:db8:1000:5bd7::1") { check(p + h == "2001:db8:1000:5bd7::1", "prefix + host reads as the address") }
+if case let .address(p, h) = v6("2001:db8:1000:5bd7::") { check(p + h == "2001:db8:1000:5bd7::", "all-zero device half -> '::'") }
+check(v6("2001:db8:1000:5bd7:1:0:0:2") == .address(prefix: "2001:db8:1000:5bd7:", host: "1::2"), "zero run in the middle")
+check(v6("2001:db8:1000:5bd7:1:2:0:0") == .address(prefix: "2001:db8:1000:5bd7:", host: "1:2::"), "zero run at the end")
+check(v6("2001:db8:1000:5bd7:b463:0:5e51:58ef") == .address(prefix: "2001:db8:1000:5bd7:", host: "b463:0:5e51:58ef"), "a single zero group is not compressed")
+check(v6("2001:db8::1") == .address(prefix: "2001:db8:0:0:", host: ":1"), "'::' inside the prefix is expanded on that side")
+check(v6("[2001:db8:1000:5bd7::1]") == v6("2001:db8:1000:5bd7::1") && v6("2001:db8:1000:5bd7::1/64") == v6("2001:db8:1000:5bd7::1"),
+      "brackets / prefix length are ignored")
+check(v6(nil) == .ipv4Only && v6("") == .ipv4Only && v6("  ") == .ipv4Only, "no entry -> IPv4 only")
+check(v6("not-an-ip") == .address(prefix: "", host: "not-an-ip") && v6("1:2:3") == .address(prefix: "", host: "1:2:3"),
+      "anything else is shown as is (never dropped)")
+check(v6("1::2::3") == .address(prefix: "", host: "1::2::3") && v6("::ffff:192.0.2.1") == .address(prefix: "", host: "::ffff:192.0.2.1"),
+      "two '::' / embedded IPv4 -> shown as is")
+check(IPv6Display.ipv4OnlyText == "IPv4 only", "IPv4 only text")
+
+// MARK: 28. /owner/devices: ipv6Entry + ipv6EntryDedicated
+
+section("28. /owner/devices: the IPv6 fields are optional and can never fail the list")
+
+do {
+    let r = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + [
+        device("i1", label: "A", name: "own", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: #","ipv6Entry":"2001:db8:1:2:3:4:5:6","ipv6EntryDedicated":true"#),
+        device("i2", label: "A", name: "shared", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: #","ipv6Entry":"2001:db8:1:2::9","ipv6EntryDedicated":false"#),
+        device("i3", label: "A", name: "v4", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: #","ipv6Entry":null,"ipv6EntryDedicated":null"#),
+        device("i4", label: "A", name: "old", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: ""),
+        device("i5", label: "A", name: "bad", model: nil, app: nil).replacingOccurrences(of: "__USAGE__", with: #","ipv6Entry":42,"ipv6EntryDedicated":"yes""#),
+    ].joined(separator: ",") + "]}")
+    let byId = Dictionary(uniqueKeysWithValues: (r.devices ?? []).map { ($0.profileId, $0) })
+    check(r.devices?.count == 5, "all five devices decode (incl. wrong-typed IPv6 fields)")
+    check(byId["i1"]?.ipv6Entry == "2001:db8:1:2:3:4:5:6" && byId["i1"]?.ipv6EntryDedicated == true, "own entry + dedicated")
+    check(byId["i2"]?.ipv6Entry == "2001:db8:1:2::9" && byId["i2"]?.ipv6EntryDedicated == false, "shared entry")
+    check(byId["i3"]?.ipv6Entry == nil && byId["i3"]?.ipv6EntryDedicated == nil, "null -> IPv4 only")
+    check(byId["i4"]?.ipv6Entry == nil, "older backend (no field) -> nil")
+    check(byId["i5"]?.ipv6Entry == nil && byId["i5"]?.ipv6EntryDedicated == nil && byId["i5"]?.displayName == "bad",
+          "wrong types read as missing; the rest of the device is intact")
+    var strictFailed = false
+    do { _ = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[{\"profileId\":\"x\"}]}") } catch { strictFailed = true }
+    check(strictFailed, "the existing required fields are still required")
+} catch { check(false, "ipv6 device decoding threw: \(error)") }
+
+// MARK: 29. People: one invite code = one person
+
+section("29. People: devices grouped under their invite code")
+
+do {
+    func inv(_ code: String, _ label: String, enabled: Bool = true, max: Int = 3) -> String {
+        "{\"code\":\"\(code)\",\"label\":\"\(label)\",\"maxDevices\":\(max),\"activeDevices\":9,\"monthlyQuotaGB\":200,\"enabled\":\(enabled)}"
+    }
+    let invitesJSON = "{\"ok\":true,\"invites\":[" + [inv("CODE-Ann", "Ann"), inv("CODE-Bob", "Bob", enabled: false),
+                                                      inv("CODE-Cy", "Cy"), inv("CODE-Own", "Owner", max: 6)].joined(separator: ",") + "]}"
+    let peopleInvites = try decode(OwnerInvitesResponse.self, invitesJSON).invites ?? []
+    func pdev(_ id: String, _ label: String, code: String, used: Double?, last: String?, enabled: Bool = true,
+              online: Bool = false, v6: String? = nil, dedicated: Bool? = nil) -> String {
+        var extra = used.map { ",\"usage\":{\"usedGB\":\($0),\"quotaGB\":200}" } ?? ""
+        extra += last.map { ",\"lastUsedAt\":\"\($0)\"" } ?? ",\"lastUsedAt\":null"
+        if online { extra += ",\"online\":true" }
+        if let v6 { extra += ",\"ipv6Entry\":\"\(v6)\"" }
+        if let dedicated { extra += ",\"ipv6EntryDedicated\":\(dedicated)" }
+        return device(id, label: label, name: "dev-" + id, model: "M", app: "1.2 (43)", enabled: enabled)
+            .replacingOccurrences(of: "CODE-\(label)", with: code)
+            .replacingOccurrences(of: "__USAGE__", with: extra)
+    }
+    let r = try decode(OwnerDevicesResponse.self, "{\"ok\":true,\"devices\":[" + [
+        pdev("a1", "Ann", code: "CODE-Ann", used: 10, last: ago(7_200), v6: "2001:db8:1:2:3:4:5:6", dedicated: true),
+        pdev("a2", "Ann", code: "CODE-Ann", used: 5, last: ago(60), online: true, v6: "2001:db8:1:2::9", dedicated: false),
+        pdev("a3", "Ann", code: "CODE-Ann", used: 1, last: ago(86_400), enabled: false, online: true),
+        pdev("b1", "Bob", code: "CODE-Bob", used: 50, last: ago(3 * 86_400)),
+        pdev("c1", "Cy", code: "CODE-Cy", used: nil, last: nil),
+        pdev("o1", "Owner", code: "CODE-Own", used: 2, last: ago(30), online: true),
+        pdev("z1", "Gone", code: "CODE-Gone", used: 99, last: ago(10)),
+    ].joined(separator: ",") + "]}")
+    let people = PeopleDirectory.people(invites: peopleInvites, access: [:], devices: r.devices ?? [], usage: r.usage,
+                                        lastUsed: r.lastUsed, ownerCodes: ["CODE-Own"])
+    check(people.map(\.label) == ["Bob", "Ann", "Owner", "Cy"], "one person per invite, most used first: \(people.map(\.label))")
+    check(!people.contains { $0.code == "CODE-Gone" } && !people.flatMap(\.devices).contains { $0.id == "z1" },
+          "a deleted person (invite no longer listed) does not appear, nor do its devices")
+    let ann = people.first { $0.label == "Ann" }!
+    check(Set(ann.devices.map(\.id)) == ["a1", "a2", "a3"], "all devices with the same invite code are under that one person")
+    check(ann.devices.map(\.id) == ["a2", "a1", "a3"], "signed-in and online devices first: \(ann.devices.map(\.id))")
+    check(ann.devicesInUse == 2 && ann.devicesText == "2/3 devices", "devices in use counts only signed-in ones (2/3)")
+    check(ann.online, "online when a signed-in device is online")
+    check(ann.devices.first { $0.id == "a3" }?.online == false, "a signed-out device is never online")
+    check(ann.usedGB.map { abs($0 - 16) < 1e-9 } == true, "usage = sum of devices, signed-out included (10 + 5 + 1)")
+    var nanUsage = r.usage
+    nanUsage["a3"] = DeviceUsage(usedGB: .nan)
+    let annNaN = PeopleDirectory.people(invites: peopleInvites, access: [:], devices: r.devices ?? [], usage: nanUsage,
+                                        lastUsed: r.lastUsed, ownerCodes: []).first { $0.label == "Ann" }!
+    check(annNaN.usedGB.map { abs($0 - 15) < 1e-9 } == true && annNaN.devices.first { $0.id == "a3" }?.usedGB == nil,
+          "a non-finite usage figure is ignored, never summed")
+    check(ann.lastUsedAt == ISODate.parse(ago(60)), "last use = most recent device")
+    check(ann.devices.first { $0.id == "a1" }?.dedicated == true && ann.devices.first { $0.id == "a2" }?.dedicated == false,
+          "dedicated flag per device")
+    check(ann.devices.first { $0.id == "a3" }?.ipv6 == .ipv4Only, "no entry -> IPv4 only")
+    check(ann.devices.first { $0.id == "a1" }?.detail(reported: true, now: spec3Now, timeZone: utc) == "v1.2 (43) \u{00B7} 2h ago",
+          "device line: version · last use")
+    check(ann.devices.first { $0.id == "a2" }?.detail(reported: true, now: spec3Now, timeZone: utc) == "v1.2 (43) \u{00B7} Now", "online device -> Now")
+    check(ann.devices.first { $0.id == "a3" }?.detail(reported: true, now: spec3Now, timeZone: utc) == "v1.2 (43) \u{00B7} 1d ago \u{00B7} Signed out",
+          "signed-out device says so")
+    let bob = people.first { $0.label == "Bob" }!
+    check(bob.paused && bob.devices.count == 1, "a paused person still appears, with their devices")
+    check(!bob.online && bob.activity(now: spec3Now, timeZone: utc) == "3d ago", "paused person: last use")
+    let cy = people.first { $0.label == "Cy" }!
+    check(cy.usedGB == nil && cy.activity(now: spec3Now) == "Never" && cy.devicesText == "1/3 devices", "no usage reported -> nil; never used -> Never")
+    let owner = people.first { $0.label == "Owner" }!
+    check(owner.isOwner && !ann.isOwner, "the owner's own invite is marked")
+    check(owner.regionName == nil, "the owner's region is not shown (they use every region)")
+    let lonely = PeopleDirectory.people(invites: peopleInvites, access: [:], devices: [], usage: [:], lastUsed: [:], ownerCodes: [])
+    check(lonely.count == 4 && lonely.allSatisfy { $0.devices.isEmpty && $0.devicesText.hasPrefix("0/") }, "people without devices are still listed")
+    check(lonely.allSatisfy { $0.activity(now: spec3Now) == nil }, "no lastUsedAt from the backend -> no activity text")
+    let withRegion = PeopleDirectory.people(invites: peopleInvites, access: ["CODE-Ann": InviteAccess(region: "singapore", expired: false)],
+                                            devices: r.devices ?? [], usage: r.usage, lastUsed: r.lastUsed, ownerCodes: [])
+    check(withRegion.first { $0.label == "Ann" }?.summary(now: spec3Now, timeZone: utc) == "Singapore \u{00B7} 2/3 devices \u{00B7} Now",
+          "row summary: region · devices · last use")
+} catch { check(false, "people decoding threw: \(error)") }
+
+// MARK: 30. Recently Deleted
+
+section("30. Recently Deleted: decode, order, texts, 404 = hidden")
+
+do {
+    let deletedJSON = """
+    {"ok":true,"invites":[
+     {"code":"RF-OLD","label":"Old","deletedAt":"2026-10-01T08:00:00.000Z","maxDevices":2,"monthlyQuotaGB":100,"region":null,"deviceCount":1},
+     {"code":"RF-NEW","label":"New","deletedAt":"2026-10-27T08:00:00.000Z","maxDevices":1,"monthlyQuotaGB":50,"region":"tokyo","deviceCount":0},
+     {"code":"RF-ODD","label":5,"deletedAt":7,"maxDevices":"x","monthlyQuotaGB":"y","region":3,"deviceCount":"z"},
+     {"label":"no code"}
+    ]}
+    """
+    let d = try decode(DeletedInvitesResponse.self, deletedJSON)
+    check(d.ok && d.invites.count == 3, "entries without a code are dropped, the rest decode")
+    let odd = d.invites.first { $0.code == "RF-ODD" }!
+    check(odd.label == "RF-ODD" && odd.deletedAt == nil && odd.maxDevices == nil && odd.region == nil && odd.deviceCount == nil,
+          "wrong-typed fields read as missing (label falls back to the code)")
+    check(RecentlyDeleted.sorted(d.invites).map(\.code) == ["RF-NEW", "RF-OLD", "RF-ODD"], "newest deletion first, undated last")
+    let newest = d.invites.first { $0.code == "RF-NEW" }!
+    let deletedNow = ISODate.parse("2026-10-30T08:00:00.000Z")!
+    check(RecentlyDeleted.detail(newest, now: deletedNow, timeZone: utc) == "Deleted 3d ago \u{00B7} 0 devices \u{00B7} 50 GB \u{00B7} Tokyo", "row detail")
+    check(RecentlyDeleted.detail(d.invites.first { $0.code == "RF-OLD" }!, now: deletedNow, timeZone: utc)
+          == "Deleted 29d ago \u{00B7} 1 device \u{00B7} 100 GB", "null region is left out")
+    let empty = try decode(DeletedInvitesResponse.self, #"{"ok":true,"invites":"oops"}"#)
+    check(empty.invites.isEmpty, "a malformed list reads as empty")
+} catch { check(false, "deleted invites decoding threw: \(error)") }
+check(RecentlyDeleted.isUnsupported(APIError.status(404, "Not Found")), "404 -> older backend: hide the entry")
+check(!RecentlyDeleted.isUnsupported(APIError.status(500, "")) && !RecentlyDeleted.isUnsupported(APIError.status(403, "")),
+      "other failures are not 'unsupported'")
+check(RecentlyDeleted.restoreMessage(APIError.status(404, "")) == "No longer in Recently Deleted", "restore 404")
+check(RecentlyDeleted.restoreMessage(APIError.status(409, #"{"ok":false,"error":"code in use"}"#)) == "This code is in use by another invite", "restore 409")
+check(RecentlyDeleted.restoreMessage(APIError.status(403, "")) == "The owner invite cannot be restored", "restore 403")
+check(RecentlyDeleted.restoreMessage(APIError.status(500, "boom")).contains("500"), "anything else keeps the server's reason")
+check(RecentlyDeleted.restoredNote == "Devices need to sign in again", "after a restore")
+check(RecentlyDeleted.deleteMessage.contains("Recently Deleted"), "the Delete confirmation says it can be restored from Recently Deleted")
+
+// MARK: 31. Home: IPv4-only Wi-Fi hint, appearance, numbers
+
+section("31. home: IPv4-only Wi-Fi hint, appearance, numbers")
+
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "tokyo"), "Wi-Fi + no IPv6 + Tokyo -> hint")
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "Tokyo"), "region compared case-insensitively")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: true, regionID: "tokyo"), "Wi-Fi with IPv6 -> no hint")
+check(!IPv6Hint.shows(onWiFi: false, wifiHasIPv6: false, regionID: "tokyo"), "cellular -> no hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "singapore"), "Singapore -> no hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: nil), "unknown region -> no hint")
+check(IPv6Hint.text == "Wi-Fi has no IPv6 \u{2014} switch to cellular", "hint text")
+check(Appearance.from(nil) == .light && Appearance.from("") == .light && Appearance.from("system") == .light,
+      "default light; never 'follow the system'")
+check(Appearance.from("dark") == .dark && Appearance.from("light") == .light, "the stored choice is kept")
+check(Appearance.allCases.map(\.title) == ["Light", "Dark"], "two choices")
+check(HomeFormat.megabytesPerSecond(18_400_000) == "18.4" && HomeFormat.megabytesPerSecond(0) == "0.0", "MB/s")
+check(HomeFormat.megabytesPerSecond(150_000_000) == "150" && HomeFormat.megabytesPerSecond(nil) == "\u{2014}"
+      && HomeFormat.megabytesPerSecond(-1) == "\u{2014}", "MB/s: big / unknown")
+check(HomeFormat.ping(38) == "38" && HomeFormat.ping(nil) == "\u{2014}", "ping: a measurement or a dash, never invented")
+check(HomeFormat.clock(5077) == "01:24:37" && HomeFormat.clock(0) == "00:00:00" && HomeFormat.clock(-5) == "00:00:00"
+      && HomeFormat.clock(.nan) == "00:00:00" && HomeFormat.clock(360_000) == "100:00:00", "connected time")
+check(HomeFormat.gigabytes(12.43) == "12.4" && HomeFormat.gigabytes(nil) == "\u{2014}" && HomeFormat.gigabytes(.nan) == "\u{2014}"
+      && HomeFormat.gigabytes(1234.4) == "1234" && HomeFormat.gigabytes(-3) == "0.0", "used GB")
+check(HomeFormat.quota(100) == "100" && HomeFormat.quota(12.5) == "12.5", "quota")
+check(HomeFormat.bytesAsGB(1_932_735_283) == "1.8 GB" && HomeFormat.bytesAsGB(-1) == "0.0 GB", "bytes -> GB")
+check(HomeFormat.fraction(used: 12.4, quota: 100).map { abs($0 - 0.124) < 1e-9 } == true && HomeFormat.fraction(used: 300, quota: 200) == 1
+      && HomeFormat.fraction(used: 5, quota: 0) == nil && HomeFormat.fraction(used: .nan, quota: 10) == nil, "bar position clamps")
+
+// MARK: 32. bundled fonts
+
+section("32. fonts: each file is in UIAppFonts and carries the PostScript name the app asks for")
+
+let repoRoot = FileManager.default.currentDirectoryPath
+let infoPlist = (try? PropertyListSerialization.propertyList(
+    from: Data(contentsOf: URL(fileURLWithPath: repoRoot + "/Supporting/RedFluentVPN-Info.plist")), format: nil)) as? [String: Any]
+let uiAppFonts = infoPlist?["UIAppFonts"] as? [String] ?? []
+check(!uiAppFonts.isEmpty && Set(uiAppFonts) == Set(AppFonts.all.map(\.file)) && uiAppFonts.count == AppFonts.all.count,
+      "UIAppFonts lists exactly the bundled fonts (\(uiAppFonts.count))")
+check(infoPlist?["CFBundleVersion"] as? String == "43", "build number untouched (43)")
+for entry in AppFonts.all {
+    let url = URL(fileURLWithPath: repoRoot + "/App/Fonts/" + entry.file)
+    let descriptors = (CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor]) ?? []
+    let name = descriptors.first.flatMap { CTFontDescriptorCopyAttribute($0, kCTFontNameAttribute) as? String }
+    let isStatic = descriptors.first.map { CTFontCopyVariationAxes(CTFontCreateWithFontDescriptor($0, 12, nil)) == nil } ?? false
+    check(descriptors.count == 1 && name == entry.postScriptName && isStatic,
+          "\(entry.file): PostScript \(name ?? "nil"), static \(isStatic)")
+}
+check(["OFL-Fraunces.txt", "OFL-Archivo.txt", "OFL-IBMPlexMono.txt"].allSatisfy {
+    (try? String(contentsOfFile: repoRoot + "/App/Fonts/" + $0, encoding: .utf8))?.contains("SIL Open Font License") == true
+}, "the three OFL licence texts ship next to the fonts")
 
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))

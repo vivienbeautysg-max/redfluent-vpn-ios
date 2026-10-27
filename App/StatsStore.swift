@@ -88,29 +88,33 @@ final class StatsStore: ObservableObject {
         }
     }
 
-    /// Lightweight HTTP HEAD-equivalent against the public health endpoint.
-    /// Stores the round-trip in `lastPingMs`; sets nil on failure/timeout.
+    /// Lightweight GET against the public health endpoint, twice on the same session: the first request also
+    /// pays for DNS + TCP + TLS, the second reuses that connection. The faster one is stored in `lastPingMs`
+    /// (an HTTPS round trip, not ICMP); nil when both fail / time out.
     /// Cancels any prior in-flight ping to dedup overlapping scenePhase calls.
     func ping() async {
         pingTask?.cancel()
         let session = pingSession
         let url = Self.pingURL
         let task = Task { [weak self] in
-            var request = URLRequest(url: url, timeoutInterval: 3)
-            request.httpMethod = "GET"
-            let started = Date()
-            let result: Int?
-            do {
-                let (_, response) = try await session.data(for: request)
-                if let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
-                    result = Int(Date().timeIntervalSince(started) * 1000)
-                } else {
-                    result = nil
+            func once() async -> Int? {
+                var request = URLRequest(url: url, timeoutInterval: 3)
+                request.httpMethod = "GET"
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                let started = Date()
+                do {
+                    let (_, response) = try await session.data(for: request)
+                    guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return nil }
+                    return Int(Date().timeIntervalSince(started) * 1000)
+                } catch {
+                    return nil
                 }
-            } catch {
-                result = nil
             }
+            let first = await once()
             if Task.isCancelled { return }
+            let second = await once()
+            if Task.isCancelled { return }
+            let result = [first, second].compactMap { $0 }.min()
             await MainActor.run { self?.lastPingMs = result }
         }
         // Fire-and-forget: do NOT `await task.value` here. The whole point

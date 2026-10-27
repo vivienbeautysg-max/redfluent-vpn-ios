@@ -111,6 +111,45 @@ struct OwnerDevice: Codable, Equatable, Identifiable {
     let lastTotalDown: Int64?
     let createdAt: String
     let revokedAt: String?
+    /// The IPv6 entry this device dials (null = it connects over IPv4 only), and whether that entry is its own
+    /// rather than the shared one. Sent by newer backends; absent or of the wrong type reads as missing.
+    var ipv6Entry: String? = nil
+    var ipv6EntryDedicated: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case profileId, inviteCode, inviteLabel, displayName, deviceName, appVersion, ownerLabel, enabled, connected,
+             inUse, online, lastSeenAt, lastHeartbeatAt, lastConnectedAt, lastDisconnectedAt, lastActiveConnections,
+             lastTotalUp, lastTotalDown, createdAt, revokedAt, ipv6Entry, ipv6EntryDedicated
+    }
+}
+
+extension OwnerDevice {
+    /// The existing fields decode exactly as before; the two IPv6 fields can never fail the device list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        profileId = try c.decode(String.self, forKey: .profileId)
+        inviteCode = try c.decode(String.self, forKey: .inviteCode)
+        inviteLabel = try c.decodeIfPresent(String.self, forKey: .inviteLabel)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        deviceName = try c.decodeIfPresent(String.self, forKey: .deviceName)
+        appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion)
+        ownerLabel = try c.decode(String.self, forKey: .ownerLabel)
+        enabled = try c.decode(Bool.self, forKey: .enabled)
+        connected = try c.decode(Bool.self, forKey: .connected)
+        inUse = try c.decode(Bool.self, forKey: .inUse)
+        online = try c.decodeIfPresent(Bool.self, forKey: .online)
+        lastSeenAt = try c.decodeIfPresent(String.self, forKey: .lastSeenAt)
+        lastHeartbeatAt = try c.decodeIfPresent(String.self, forKey: .lastHeartbeatAt)
+        lastConnectedAt = try c.decodeIfPresent(String.self, forKey: .lastConnectedAt)
+        lastDisconnectedAt = try c.decodeIfPresent(String.self, forKey: .lastDisconnectedAt)
+        lastActiveConnections = try c.decodeIfPresent(Int.self, forKey: .lastActiveConnections)
+        lastTotalUp = try c.decodeIfPresent(Int64.self, forKey: .lastTotalUp)
+        lastTotalDown = try c.decodeIfPresent(Int64.self, forKey: .lastTotalDown)
+        createdAt = try c.decode(String.self, forKey: .createdAt)
+        revokedAt = try c.decodeIfPresent(String.self, forKey: .revokedAt)
+        ipv6Entry = (try? c.decodeIfPresent(String.self, forKey: .ipv6Entry)) ?? nil
+        ipv6EntryDedicated = (try? c.decodeIfPresent(Bool.self, forKey: .ipv6EntryDedicated)) ?? nil
+    }
 }
 
 /// Result of GET /owner/devices. `usage` / `period` are empty / nil on a backend that predates
@@ -472,6 +511,32 @@ actor APIClient {
             throw APIError.status(403, env.error ?? "delete invite rejected")
         }
         return env.revokedDevices ?? 0
+    }
+
+    /// People deleted in the last 30 days, newest first. A backend without it answers 404 (see RecentlyDeleted).
+    func fetchDeletedInvites(token: String) async throws -> [DeletedInvite] {
+        let env: DeletedInvitesResponse = try await get(path: "/owner/invites/deleted", token: token)
+        guard env.ok else {
+            throw APIError.status(403, env.error ?? "deleted invites rejected")
+        }
+        return RecentlyDeleted.sorted(env.invites)
+    }
+
+    /// Brings a deleted person back (their devices stay signed out). 404 / 409 / 403 come back as APIError.status.
+    /// The returned invite is not decoded: the caller reloads the list, so a shape surprise there cannot turn a
+    /// restore that worked into an error.
+    func restoreInvite(code: String, token: String) async throws {
+        struct Request: Encodable {
+            let code: String
+        }
+        struct Envelope: Decodable {
+            let ok: Bool
+            let error: String?
+        }
+        let env: Envelope = try await post(path: "/owner/invites/restore", body: Request(code: code), token: token)
+        guard env.ok else {
+            throw APIError.status(403, env.error ?? "restore rejected")
+        }
     }
 
     func fetchOwnerDevices(token: String) async throws -> OwnerDevicesResult {

@@ -328,14 +328,4 @@ enum TunnelStatus: Equatable {
         case .failed:        return "Needs attention"
         }
     }
-
-    var detail: String {
-        switch self {
-        case .disconnected:  return "Tap Connect to start the secure tunnel."
-        case .connecting:    return "Establishing the encrypted tunnel."
-        case .connected:     return "Your device is using the RedFluent secure tunnel."
-        case .disconnecting: return "Closing the tunnel."
-        case .failed:        return "Open Diagnostics for details."
-        }
-    }
 }
