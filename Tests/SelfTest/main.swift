@@ -1043,7 +1043,13 @@ let infoPlist = (try? PropertyListSerialization.propertyList(
 let uiAppFonts = infoPlist?["UIAppFonts"] as? [String] ?? []
 check(!uiAppFonts.isEmpty && Set(uiAppFonts) == Set(AppFonts.all.map(\.file)) && uiAppFonts.count == AppFonts.all.count,
       "UIAppFonts lists exactly the bundled fonts (\(uiAppFonts.count))")
-check(infoPlist?["CFBundleVersion"] as? String == "43", "build number untouched (43)")
+let tunnelInfoPlist = (try? PropertyListSerialization.propertyList(
+    from: Data(contentsOf: URL(fileURLWithPath: repoRoot + "/Supporting/RedFluentVPNTunnel-Info.plist")), format: nil)) as? [String: Any]
+let appVersion = (infoPlist?["CFBundleShortVersionString"] as? String, infoPlist?["CFBundleVersion"] as? String)
+let tunnelVersion = (tunnelInfoPlist?["CFBundleShortVersionString"] as? String, tunnelInfoPlist?["CFBundleVersion"] as? String)
+check(appVersion.0 != nil && appVersion.1.map { Int($0) != nil } == true
+      && appVersion.0 == tunnelVersion.0 && appVersion.1 == tunnelVersion.1,
+      "app and tunnel plists carry the same CFBundleShortVersionString and CFBundleVersion (\(appVersion.0 ?? "nil") (\(appVersion.1 ?? "nil")))")
 for entry in AppFonts.all {
     let url = URL(fileURLWithPath: repoRoot + "/App/Fonts/" + entry.file)
     let descriptors = (CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor]) ?? []
