@@ -13,6 +13,8 @@ enum SharedContainer {
     static let lastGoodFileName = "last-good-config.json"
     /// Must stay identical to DeviceTokenMirror.fileName in the app target.
     static let deviceTokenFileName = "device-token"
+    /// Must stay identical to RegionStore.ipv4BlockedKey in the app target.
+    static let ipv4BlockedKey = "rfv.region.ipv4Blocked"
 
     static var containerURL: URL? {
         FileManager.default
@@ -63,6 +65,21 @@ enum SharedContainer {
 
     static func clearActiveRegion() {
         UserDefaults(suiteName: appGroupID)?.removeObject(forKey: activeRegionKey)
+    }
+
+    /// [region id (lowercased): runtimeMeta.ipv4Blocked of that region's last runtime config]. A region whose last
+    /// config did not say (older backend) has no entry, so the app keeps its old rule for it.
+    static func updatedIPv4Blocked(_ current: [String: Bool], region: String, blocked: Bool?) -> [String: Bool] {
+        var next = current
+        next[region.lowercased()] = blocked
+        return next
+    }
+
+    /// After every runtime config the server answered with (start and follow checks), for the app's Wi-Fi hint.
+    static func writeIPv4Blocked(_ blocked: Bool?, region: String) {
+        guard let defaults = UserDefaults(suiteName: appGroupID) else { return }
+        let current = defaults.dictionary(forKey: ipv4BlockedKey) as? [String: Bool] ?? [:]
+        defaults.set(updatedIPv4Blocked(current, region: region, blocked: blocked), forKey: ipv4BlockedKey)
     }
 
     static var startErrorURL: URL? {

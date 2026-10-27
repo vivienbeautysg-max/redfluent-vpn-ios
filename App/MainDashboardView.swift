@@ -7,6 +7,7 @@ struct MainDashboardView: View {
     @EnvironmentObject private var quotaStore: QuotaStore
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.rfReduceMotion) private var reduceMotion
     @AppStorage(Appearance.storageKey) private var appearanceRaw = Appearance.light.rawValue
     @StateObject private var wifi = WiFiPathWatcher()
     @State private var showingDiagnostics = false
@@ -15,7 +16,8 @@ struct MainDashboardView: View {
     @State private var showingSignOutConfirm = false
     @State private var heartbeatTask: Task<Void, Never>?
     @State private var pingTask: Task<Void, Never>?
-    @State private var appleLinkError: String?
+    /// The answer to linking the Apple ID (the only server action on this page).
+    @State private var feedback: ActionFeedback?
 
     private static let privacyURL = URL(string: "https://www.redfluent.com/privacy")!
     private static let termsURL = URL(string: "https://www.redfluent.com/terms")!
@@ -27,22 +29,32 @@ struct MainDashboardView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     navRow
-                    DotTitle(text: tunnelManager.status.displayName, size: compact ? 44 : 50, dot: titleDot)
+                        .entrance(0)
+                    statusTitle(size: compact ? 44 : 50)
                         .padding(.top, compact ? 6 : 18)
-                    metaRow
-                        .padding(.top, 12)
-                    notices
+                        .entrance(1)
+                    VStack(alignment: .leading, spacing: 0) {
+                        metaRow
+                            .padding(.top, 12)
+                        notices
+                    }
+                    .entrance(2)
                     hero(height: compact ? 184 : 236)
                         .padding(.horizontal, -Theme.gutter)
                         .padding(.top, compact ? 4 : 18)
+                        .entrance(3)
                     statsRow
-                    bandwidth
-                        .padding(.top, compact ? 18 : 24)
-                    profileRow
-                        .padding(.top, compact ? 20 : 26)
-                    if FeatureFlags.appleSignInEnabled && !appState.appleLinked {
-                        appleLinkCard.padding(.top, 24)
+                        .entrance(4)
+                    VStack(alignment: .leading, spacing: 0) {
+                        bandwidth
+                            .padding(.top, compact ? 18 : 24)
+                        profileRow
+                            .padding(.top, compact ? 20 : 26)
+                        if FeatureFlags.appleSignInEnabled && !appState.appleLinked {
+                            appleLinkCard.padding(.top, 24)
+                        }
                     }
+                    .entrance(5)
                 }
                 .padding(.horizontal, Theme.gutter)
                 .padding(.bottom, 20)
@@ -50,6 +62,7 @@ struct MainDashboardView: View {
             .scrollBounceBehavior(.basedOnSize)
         }
         .rfPage()
+        .actionBanner($feedback)
         .sheet(isPresented: $showingDiagnostics) {
             DiagnosticsView()
                 .environmentObject(appState)
@@ -96,7 +109,14 @@ struct MainDashboardView: View {
             stopPingLoop()
             wifi.stop()
         }
-        .onChange(of: tunnelManager.status) { _, status in
+        .onAppear { Haptics.prepare() }
+        .onChange(of: tunnelManager.status) { old, status in
+            switch Self.statusHaptic(from: old, to: status) {
+            case .success?: Haptics.success()
+            case .failure?: Haptics.failure()
+            case .off?:     Haptics.off()
+            case nil:       break
+            }
             guard !isScreenshot else { return }
             if status == .connected {
                 startPingLoop()
@@ -138,7 +158,7 @@ struct MainDashboardView: View {
                     }
                 }
                 Section {
-                    Picker(selection: $appearanceRaw) {
+                    Picker(selection: appearanceBinding) {
                         ForEach(Appearance.allCases) { option in
                             Text(option.title).tag(option.rawValue)
                         }
@@ -161,15 +181,50 @@ struct MainDashboardView: View {
             } label: {
                 MoreGlyph()
             }
+            .menuStyle(.button)
+            .buttonStyle(PressStyle())
             .accessibilityLabel("More")
         }
         .frame(height: 50)
+    }
+
+    /// Light / dark from the menu: a selection tick, and the whole UI cross-fades to the other colours.
+    private var appearanceBinding: Binding<String> {
+        Binding(get: { appearanceRaw }, set: { raw in
+            guard raw != appearanceRaw else { return }
+            Haptics.select()
+            ThemeFade.apply { appearanceRaw = raw }
+        })
     }
 
     private var titleDot: DotStyle {
         switch tunnelManager.status {
         case .connected, .connecting: return .filled
         default:                      return .hollow
+        }
+    }
+
+    /// "Connected." / "Disconnected.": the new title cross-fades in, rising 4 pt out of a slight blur, over the old
+    /// one (both in one ZStack, so nothing below moves). Reduce Motion: a plain cross-fade.
+    private func statusTitle(size: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            DotTitle(text: tunnelManager.status.displayName, size: size, dot: titleDot)
+                .id(tunnelManager.status.displayName)
+                .transition(reduceMotion ? .opacity : .titleSwap)
+        }
+        .animation(.easeInOut(duration: 0.3), value: tunnelManager.status)
+    }
+
+    enum StatusHaptic { case success, failure, off }
+
+    /// Haptic for a tunnel status change: connected after connecting = success; a start or stop that failed = error;
+    /// down after being up or going down = soft. Nothing for states reported at launch (disconnected -> connected).
+    static func statusHaptic(from old: TunnelStatus, to new: TunnelStatus) -> StatusHaptic? {
+        switch (old, new) {
+        case (.connecting, .connected):                      return .success
+        case (.connecting, .failed), (.disconnecting, .failed): return .failure
+        case (.connected, .disconnected), (.disconnecting, .disconnected): return .off
+        default:                                             return nil
         }
     }
 
@@ -191,7 +246,10 @@ struct MainDashboardView: View {
                         Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(Theme.Color.ink)
+                    .touchTarget(height: 20)
                 }
+                .menuStyle(.button)
+                .buttonStyle(PressStyle())
                 .disabled(tunnelManager.status == .connecting || tunnelManager.status == .disconnecting)
             } else {
                 Text(regionName).foregroundStyle(Theme.Color.ink)
@@ -206,10 +264,11 @@ struct MainDashboardView: View {
     private var connectedTime: some View {
         if connected, let started = statsStore.snapshot?.connectionStartedAt {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(HomeFormat.clock(context.date.timeIntervalSince(started)))
+                let clock = HomeFormat.clock(context.date.timeIntervalSince(started))
+                Text(clock)
                     .font(Theme.Font.text(16))
-                    .monospacedDigit()
                     .foregroundStyle(Theme.Color.stone)
+                    .rollingNumber(clock)
             }
         } else {
             Text(HomeFormat.none).font(Theme.Font.text(16)).foregroundStyle(Theme.Color.stone)
@@ -217,23 +276,23 @@ struct MainDashboardView: View {
     }
 
     /// One short line each: account expiry, the IPv4-only Wi-Fi hint, a failed start.
-    @ViewBuilder
+    /// Lines come and go with a fade and a 6 pt drop instead of popping in.
     private var notices: some View {
         let lines = noticeLines
-        if !lines.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(lines, id: \.text) { line in
-                    Label {
-                        Text(line.text).lineLimit(2)
-                    } icon: {
-                        Image(systemName: line.icon).font(.system(size: 12, weight: .semibold))
-                    }
-                    .font(Theme.Font.text(13.5, .medium))
-                    .foregroundStyle(Theme.Color.red)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(lines, id: \.text) { line in
+                Label {
+                    Text(line.text).lineLimit(2)
+                } icon: {
+                    Image(systemName: line.icon).font(.system(size: 12, weight: .semibold))
                 }
+                .font(Theme.Font.text(13.5, .medium))
+                .foregroundStyle(Theme.Color.red)
+                .transition(reduceMotion ? .opacity : .notice)
             }
-            .padding(.top, 12)
         }
+        .padding(.top, lines.isEmpty ? 0 : 12)
+        .animation(reduceMotion ? Motion.fade : .easeOut(duration: 0.25), value: lines.map(\.text))
     }
 
     private struct NoticeLine { let icon: String; let text: String }
@@ -245,7 +304,8 @@ struct MainDashboardView: View {
         } else if let left = ExpiryDisplay.daysLeftText(appState.expiry) {
             out.append(NoticeLine(icon: "calendar", text: left))
         }
-        if IPv6Hint.shows(onWiFi: wifi.onWiFi, wifiHasIPv6: wifi.wifiHasIPv6, regionID: regionID) {
+        if IPv6Hint.shows(onWiFi: wifi.onWiFi, wifiHasIPv6: wifi.wifiHasIPv6, regionID: regionID,
+                          ipv4Blocked: isScreenshot ? nil : RegionStore.ipv4Blocked(regionID: regionID)) {
             out.append(NoticeLine(icon: "wifi.exclamationmark", text: IPv6Hint.text))
         }
         if tunnelManager.status == .failed, let error = tunnelManager.lastError, !error.isEmpty {
@@ -260,19 +320,67 @@ struct MainDashboardView: View {
         let status = tunnelManager.status
         let enabled = !appState.expiry.expired || status.isConnected
         return Button {
-            Task { await tunnelManager.toggle() }
+            Haptics.tap()
+            toggle()
         } label: {
-            LandingArt(landed: status == .connected || status == .connecting,
+            // Connecting: the dot still hovers and the glow breathes; it lands (and the line dips) once connected.
+            LandingArt(landed: status == .connected,
                        glowing: status == .connected,
                        pulsing: status == .connecting || status == .disconnecting,
                        height: height)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PowerPressStyle())
         .disabled(status == .connecting || status == .disconnecting || !enabled)
         .opacity(enabled ? 1 : 0.45)
         .accessibilityLabel(status.isConnected ? "Disconnect" : "Connect")
     }
+
+    private func toggle() {
+        #if DEBUG
+        if isScreenshot { demoToggle(); return }
+        #endif
+        Task { await tunnelManager.toggle() }
+    }
+
+    #if DEBUG
+    /// Screenshot / demo runs (no VPN on the simulator): the states the tunnel goes through, with real-ish timing and
+    /// moving numbers once connected. `-RFVFailConnect`: the start fails instead.
+    private func demoToggle() {
+        if tunnelManager.status.isConnected {
+            tunnelManager.status = .disconnecting
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                tunnelManager.status = .disconnected
+                statsStore.snapshot = nil
+                ScreenshotMode.stageActiveRegion(connected: false)
+            }
+            return
+        }
+        tunnelManager.lastError = nil
+        tunnelManager.status = .connecting
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            guard tunnelManager.status == .connecting else { return }
+            if ScreenshotMode.failsConnect {
+                tunnelManager.lastError = "Can't reach server"
+                tunnelManager.status = .failed
+                return
+            }
+            ScreenshotMode.stageActiveRegion(connected: true)
+            statsStore.snapshot = ScreenshotMode.stats(now: Date(), startedAgo: 0)
+            tunnelManager.status = .connected
+            tickDemoNumbers()
+        }
+    }
+
+    /// While the demo is connected, new speeds and pings every 1.2 s, so the figures can be seen rolling.
+    private func tickDemoNumbers() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard tunnelManager.status == .connected, let snap = statsStore.snapshot else { return }
+            statsStore.snapshot = ScreenshotMode.nextDemoStats(after: snap)
+            tickDemoNumbers()
+        }
+    }
+    #endif
 
     // MARK: - Down / Up / Ping
 
@@ -293,10 +401,10 @@ struct MainDashboardView: View {
             Text(value)
                 .font(Theme.Font.display(32))
                 .tracking(-0.02 * 32)
-                .monospacedDigit()
                 .foregroundStyle(value == HomeFormat.none ? Theme.Color.stone : Theme.Color.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
+                .rollingNumber(value)
             Text(label).rfLabelStyle()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -313,7 +421,20 @@ struct MainDashboardView: View {
     private var bandwidth: some View {
         let snap = quotaStore.snapshot
         let fraction = snap.flatMap { HomeFormat.fraction(used: $0.usedGB, quota: $0.monthlyQuotaGB) } ?? 0
-        return VStack(alignment: .leading, spacing: 0) {
+        // The whole block is a quiet Refresh: it gets the row highlight when pressed.
+        return Button {
+            guard !isScreenshot else { return }
+            quotaStore.refresh(token: appState.currentProfile?.token)
+        } label: {
+            bandwidthBody(snap: snap, fraction: fraction)
+        }
+        .buttonStyle(RowPressStyle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Refresh")
+    }
+
+    private func bandwidthBody(snap: QuotaSnapshot?, fraction: Double) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Bandwidth").rfLabelStyle()
                 Spacer()
@@ -330,6 +451,7 @@ struct MainDashboardView: View {
                     .foregroundStyle(snap == nil ? Theme.Color.stone : Theme.Color.ink)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+                    .rollingNumber(snap?.usedGB)
                 if let snap {
                     Text("/ \(HomeFormat.quota(snap.monthlyQuotaGB)) GB")
                         .font(Theme.Font.text(17, .medium))
@@ -346,19 +468,13 @@ struct MainDashboardView: View {
             .padding(.top, 14)
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            guard !isScreenshot else { return }
-            quotaStore.refresh(token: appState.currentProfile?.token)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Refresh")
     }
 
     private func ioText(_ label: String, _ value: String?) -> some View {
         (Text(label + " ").foregroundStyle(Theme.Color.stone)
             + Text(value ?? HomeFormat.none).font(Theme.Font.text(13.5, .semibold)).foregroundStyle(Theme.Color.ink))
             .font(Theme.Font.text(13.5))
+            .rollingNumber(value)
     }
 
     // MARK: - Profile
@@ -404,16 +520,16 @@ struct MainDashboardView: View {
             AppleRecoverButton(
                 onLightBackground: colorScheme != .dark,
                 onToken: { token in
-                    appleLinkError = nil
-                    Task { await appState.linkApple(identityToken: token) }
+                    feedback = nil
+                    Task {
+                        appState.lastActivationError = nil
+                        await appState.linkApple(identityToken: token)
+                        feedback = appState.appleLinked ? .success("Linked to your Apple ID")
+                            : .failure(appState.lastActivationError ?? "Not linked")
+                    }
                 },
-                onError: { message in appleLinkError = message }
+                onError: { message in feedback = .failure(message) }
             )
-            if let appleLinkError {
-                Text(appleLinkError)
-                    .font(Theme.Font.text(12.5, .medium))
-                    .foregroundStyle(Theme.Color.red)
-            }
         }
     }
 
@@ -441,7 +557,10 @@ struct MainDashboardView: View {
     }
 
     private var regionBinding: Binding<String> {
-        Binding(get: { appState.selectedRegionID }, set: { appState.selectRegion($0) })
+        Binding(get: { appState.selectedRegionID }, set: { id in
+            if id != appState.selectedRegionID { Haptics.select() }
+            appState.selectRegion(id)
+        })
     }
 
     // MARK: - Ping / heartbeat
@@ -511,6 +630,7 @@ struct UsageLine: View {
             .frame(height: 14)
         }
         .frame(height: 14)
+        .animation(Motion.numbers, value: fraction)
         .accessibilityHidden(true)
     }
 }

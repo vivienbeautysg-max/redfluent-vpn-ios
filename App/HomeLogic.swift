@@ -18,15 +18,19 @@ enum Appearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// Tokyo's IPv4 address is blocked in China; only its IPv6 entry gets through. On a Wi-Fi without IPv6 a Tokyo
-/// device therefore cannot connect, and the home screen says so in one line.
+/// While a region's IPv4 address is blocked in China only its IPv6 entry gets through, so on a Wi-Fi without IPv6
+/// the device cannot connect, and the home screen says so in one line. The server says whether the IPv4 entry is
+/// blocked (runtimeMeta.ipv4Blocked, kept by the tunnel per region); an older backend does not say, and then the
+/// old rule stays: Tokyo is blocked.
 enum IPv6Hint {
     static let text = "Wi-Fi has no IPv6 \u{2014} switch to cellular"
     static let regionID = "tokyo"
 
     /// `onWiFi`: the Wi-Fi path is up. `wifiHasIPv6`: that path can route IPv6. `regionID`: the region in use.
-    static func shows(onWiFi: Bool, wifiHasIPv6: Bool, regionID: String?) -> Bool {
+    /// `ipv4Blocked`: what that region's last runtime config said; nil when it did not say.
+    static func shows(onWiFi: Bool, wifiHasIPv6: Bool, regionID: String?, ipv4Blocked: Bool?) -> Bool {
         guard onWiFi, !wifiHasIPv6, let regionID else { return false }
+        if let ipv4Blocked { return ipv4Blocked }
         return RegionPolicy.matches(regionID, Self.regionID)
     }
 }

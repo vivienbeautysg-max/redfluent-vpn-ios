@@ -304,6 +304,8 @@ enum APIError: Error, LocalizedError {
             return "Owner devices are protected and cannot be revoked here."
         case "region unavailable":
             return "Region unavailable."
+        case "invite code already exists":
+            return "This code is already in use."
         default:
             return "Server error \(code): \(reason)"
         }

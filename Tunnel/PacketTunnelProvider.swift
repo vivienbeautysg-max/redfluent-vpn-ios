@@ -294,6 +294,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             logger.info("using per-device config from backend")
             let echoed = obj["region"] as? String
+            SharedContainer.writeIPv4Blocked(RuntimeConfigRequest.ipv4Blocked(in: obj), region: echoed ?? region)
             return RuntimeConfigFetch(data: try JSONSerialization.data(withJSONObject: rc, options: [.sortedKeys]),
                                       serverRegion: obj["serverRegion"] as? String,
                                       echoedRegion: echoed,

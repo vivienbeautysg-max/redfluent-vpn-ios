@@ -11,8 +11,8 @@ struct PersonView: View {
     @State private var draft: PersonDraft?
     @State private var original: PersonDraft?
     @State private var saving = false
-    @State private var working = false
-    @State private var message: String?
+    /// The action running now; its own row shows the spinner.
+    @State private var busy: Busy?
     @State private var confirmingDelete = false
     @State private var confirmingLogOutAll = false
     @State private var deviceForActions: PersonDevice?
@@ -28,38 +28,22 @@ struct PersonView: View {
 
     private var person: Person? { model.person(code: code) }
 
+    private enum Busy: Equatable { case delete, logOutAll, device(String) }
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    BarRow {
-                        BackButton(title: "People") { dismiss() }
-                    } trailing: {
-                        if saving {
-                            ProgressView().tint(Theme.Color.stone)
-                        } else if isDirty {
-                            BarButton(title: "Save", bold: true, enabled: pendingEdit != nil) { save() }
-                        }
-                    }
-                    if let person, draft != nil {
-                        content(person)
-                    } else if person == nil {
-                        Text("Not found")
-                            .font(Theme.Font.text(15))
-                            .foregroundStyle(Theme.Color.stone)
-                            .padding(.top, 24)
-                    }
+        VStack(spacing: 0) {
+            // Pinned: Save and its busy state stay in view while the keyboard is up on a field further down.
+            BarRow {
+                BackButton(title: "People") { dismiss() }
+            } trailing: {
+                if saving {
+                    ProgressView().tint(Theme.Color.stone)
+                } else if isDirty {
+                    BarButton(title: "Save", bold: true, enabled: pendingEdit != nil && busy == nil) { save() }
                 }
-                .padding(.horizontal, Theme.gutter)
-                .padding(.bottom, 40)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .onAppear {
-                loadDraft()
-                #if DEBUG
-                screenshotHooks(proxy)
-                #endif
-            }
+            .padding(.horizontal, Theme.gutter)
+            scroller
         }
         .rfPage()
         .toolbar(.hidden, for: .navigationBar)
@@ -101,6 +85,33 @@ struct PersonView: View {
         }
     }
 
+    private var scroller: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let person, draft != nil {
+                        content(person)
+                    } else if person == nil {
+                        Text("Not found")
+                            .font(Theme.Font.text(15))
+                            .foregroundStyle(Theme.Color.stone)
+                            .padding(.top, 24)
+                    }
+                }
+                .padding(.horizontal, Theme.gutter)
+                .padding(.bottom, 40)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .underPinnedBar()
+            .onAppear {
+                loadDraft()
+                #if DEBUG
+                screenshotHooks(proxy)
+                #endif
+            }
+        }
+    }
+
     // MARK: - Content
 
     @ViewBuilder
@@ -108,20 +119,24 @@ struct PersonView: View {
         let now = Date()
         DotTitle(text: person.label, size: 46, dot: person.online ? .filled : .hollow, lineLimit: 2)
             .padding(.top, 14)
-        HStack(spacing: 8) {
-            Text(person.summary(now: now))
-                .font(Theme.Font.text(14, .medium))
-                .foregroundStyle(Theme.Color.stone)
-                .lineLimit(2)
-            if person.paused { Tag(text: "Paused", color: Theme.Color.stone) }
+            .entrance(0)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(person.summary(now: now))
+                    .font(Theme.Font.text(14, .medium))
+                    .foregroundStyle(Theme.Color.stone)
+                    .lineLimit(2)
+                if person.paused { Tag(text: "Paused", color: Theme.Color.stone) }
+            }
+            .padding(.top, 10)
+            if !person.isOwner, let status = InviteStatusLine.status(person.access) {
+                Text(status.text)
+                    .font(Theme.Font.text(13, .medium))
+                    .foregroundStyle(status.tone.color)
+                    .padding(.top, 6)
+            }
         }
-        .padding(.top, 10)
-        if !person.isOwner, let status = InviteStatusLine.status(person.access) {
-            Text(status.text)
-                .font(Theme.Font.text(13, .medium))
-                .foregroundStyle(status.tone.color)
-                .padding(.top, 6)
-        }
+        .entrance(1)
 
         // This period
         VStack(alignment: .leading, spacing: 0) {
@@ -137,101 +152,104 @@ struct PersonView: View {
                     .font(Theme.Font.display(60))
                     .tracking(-0.035 * 60)
                     .foregroundStyle(person.usedGB == nil ? Theme.Color.stone : Theme.Color.ink)
+                    .rollingNumber(person.usedGB)
                 Text("GB").font(Theme.Font.text(17, .medium)).foregroundStyle(Theme.Color.stone)
             }
             .padding(.top, 10)
         }
         .padding(.top, 24)
+        .entrance(2)
 
         // Devices
-        SectionLabel(text: OwnerSectionTitle.counted("Devices", person.devices.count))
-            .padding(.top, 28)
-            .padding(.bottom, 2)
-        Rule()
-        if person.devices.isEmpty {
-            Text("No devices")
-                .font(Theme.Font.text(14))
-                .foregroundStyle(Theme.Color.stone)
-                .padding(.vertical, 14)
-        }
-        ForEach(person.devices) { row in
-            Button {
-                deviceForActions = row
-            } label: {
-                DeviceRow(row: row, reported: person.lastUsedReported, now: now)
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: OwnerSectionTitle.counted("Devices", person.devices.count))
+                .padding(.top, 28)
+                .padding(.bottom, 2)
+            Rule()
+            if person.devices.isEmpty {
+                Text("No devices")
+                    .font(Theme.Font.text(14))
+                    .foregroundStyle(Theme.Color.stone)
+                    .padding(.vertical, 14)
             }
-            .buttonStyle(.plain)
+            ForEach(person.devices) { row in
+                Button {
+                    deviceForActions = row
+                } label: {
+                    DeviceRow(row: row, reported: person.lastUsedReported, now: now, busy: busy == .device(row.id))
+                }
+                .buttonStyle(RowPressStyle())
+                .disabled(busy != nil)
+            }
         }
+        .entrance(3)
 
         // Settings
-        SectionLabel(text: "Settings")
-            .padding(.top, 28)
-            .padding(.bottom, 2)
-        Rule()
-        SettingRow(label: "Name") {
-            ThemedField(placeholder: "Name", text: field(\.label, ""))
-        }
-        SettingRow(label: "Code") {
-            ThemedField(placeholder: "Code", text: field(\.code, ""), mono: true)
-                .disabled(person.isOwner)
-                .opacity(person.isOwner ? 0.6 : 1)
-        }
-        QuotaField(text: field(\.quotaText, ""), focused: $quotaFocused)
-            .id("quota")
-        SettingRow(label: "Device limit") {
-            NumberStepper(value: field(\.maxDevices, 1), range: PersonDraft.deviceLimit)
-        }
-        if showsAccessControls(person) {
-            InviteAccessRows(
-                region: field(\.region, RegionPolicy.defaultID),
-                access: field(\.access, AccessChoice()),
-                regionOptions: regionOptions(person),
-                showsAccess: !isReview(person)
-            )
-        }
-        if !person.isOwner {
-            SettingRow(label: "Status") {
-                SegmentedChoice(options: [(value: true, title: "Active"), (value: false, title: "Paused")],
-                                selection: field(\.enabled, true))
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Settings")
+                .padding(.top, 28)
+                .padding(.bottom, 2)
+            Rule()
+            SettingRow(label: "Name") {
+                ThemedField(placeholder: "Name", text: field(\.label, ""))
+            }
+            SettingRow(label: "Code") {
+                ThemedField(placeholder: "Code", text: field(\.code, ""), mono: true)
+                    .disabled(person.isOwner)
+                    .opacity(person.isOwner ? 0.6 : 1)
+            }
+            QuotaField(text: field(\.quotaText, ""), focused: $quotaFocused)
+                .id("quota")
+            SettingRow(label: "Device limit") {
+                NumberStepper(value: field(\.maxDevices, 1), range: PersonDraft.deviceLimit)
+            }
+            if showsAccessControls(person) {
+                InviteAccessRows(
+                    region: field(\.region, RegionPolicy.defaultID),
+                    access: field(\.access, AccessChoice()),
+                    regionOptions: regionOptions(person),
+                    showsAccess: !isReview(person)
+                )
+            }
+            if !person.isOwner {
+                SettingRow(label: "Status") {
+                    SegmentedChoice(options: [(value: true, title: "Active"), (value: false, title: "Paused")],
+                                    selection: field(\.enabled, true))
+                }
             }
         }
-
-        if let message {
-            Text(message)
-                .font(Theme.Font.text(13, .medium))
-                .foregroundStyle(Theme.Color.red)
-                .padding(.top, 14)
-        }
+        .entrance(4)
 
         // Actions
         if !person.isOwner {
             VStack(spacing: 0) {
                 if person.devicesInUse > 0 {
-                    actionRow("Log out all devices", systemImage: "rectangle.portrait.and.arrow.right") {
+                    actionRow("Log out all devices", systemImage: "rectangle.portrait.and.arrow.right", busy: busy == .logOutAll) {
                         confirmingLogOutAll = true
                     }
                 }
-                actionRow("Delete", systemImage: "trash") { confirmingDelete = true }
+                actionRow("Delete", systemImage: "trash", busy: busy == .delete) { confirmingDelete = true }
             }
             .padding(.top, 28)
-            .disabled(working || saving)
+            .disabled(busy != nil || saving)
+            .entrance(5)
         }
     }
 
-    private func actionRow(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func actionRow(_ title: String, systemImage: String, busy: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemImage).font(.system(size: 14, weight: .medium))
                 Text(title).font(Theme.Font.text(15, .semibold))
                 Spacer()
-                if working { ProgressView().tint(Theme.Color.stone) }
+                if busy { ProgressView().tint(Theme.Color.stone) }
             }
             .foregroundStyle(Theme.Color.red)
             .frame(minHeight: 52)
             .contentShape(Rectangle())
             .overlay(alignment: .top) { Rule() }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(RowPressStyle())
     }
 
     // MARK: - Edit state
@@ -271,58 +289,83 @@ struct PersonView: View {
     // MARK: - Actions
 
     private func save() {
-        guard let person, let edit = pendingEdit, let token else { return }
-        let body = InviteBody.update(original: person.invite, originalAccess: person.access, edit: edit)
+        guard !saving, busy == nil else { return }
         saving = true
-        message = nil
-        quotaFocused = false
+        model.feedback = nil
         Task {
+            // Read the fields only after editing ended: text still being composed is in them now.
+            await EditCommit.endEditing()
+            guard let person, let token else { saving = false; return }
+            guard let edit = pendingEdit else {
+                saving = false
+                model.feedback = .failure("Not saved: a field is not valid")
+                return
+            }
+            let body = InviteBody.update(original: person.invite, originalAccess: person.access, edit: edit)
             let error = await model.updateInvite(body, token: token)
             saving = false
             if let error {
-                message = error
+                model.feedback = .failure(error)
             } else {
                 code = edit.code
                 loadDraft()
+                model.feedback = .success("Saved")
             }
         }
     }
 
     private func delete() {
-        guard let person, let token else { return }
-        working = true
-        message = nil
+        guard busy == nil, let person, let token else { return }
+        busy = .delete
+        model.feedback = nil
         Task {
             let error = await model.deleteInvite(person.invite, token: token)
-            working = false
-            if let error { message = error } else { dismiss() }
+            busy = nil
+            if let error {
+                model.feedback = .failure(error)
+            } else {
+                // The banner sits above the whole stack, so it is still there on the People page after the pop.
+                model.feedback = .success("\(person.label) deleted",
+                                          detail: model.deletedSupported ? RecentlyDeleted.deleteMessage : nil)
+                dismiss()
+            }
         }
     }
 
     private func logOutAll() {
-        guard let person, let token else { return }
-        working = true
-        message = nil
+        guard busy == nil, let person, let token else { return }
+        busy = .logOutAll
+        model.feedback = nil
         Task {
-            message = await model.logOutAll(code: person.code, token: token)
-            working = false
+            let error = await model.logOutAll(code: person.code, token: token)
+            busy = nil
+            model.feedback = error.map(ActionFeedback.failure) ?? .success("Devices logged out")
         }
     }
 
     private func logOut(_ row: PersonDevice) {
-        guard let token else { return }
-        working = true
-        message = nil
+        guard busy == nil, let token else { return }
+        busy = .device(row.id)
+        model.feedback = nil
         Task {
-            message = await model.revokeDevice(row.device, token: token)
-            working = false
+            let error = await model.revokeDevice(row.device, token: token)
+            busy = nil
+            model.feedback = error.map(ActionFeedback.failure) ?? .success("\(row.device.displayName) logged out")
         }
     }
 
     private func rename(_ row: PersonDevice) {
-        let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name != row.device.displayName, let token else { return }
-        Task { message = await model.renameDevice(row.device, displayName: name, token: token) }
+        guard busy == nil, let token else { return }
+        busy = .device(row.id)
+        model.feedback = nil
+        Task {
+            await EditCommit.endEditing()
+            let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, name != row.device.displayName else { busy = nil; return }
+            let error = await model.renameDevice(row.device, displayName: name, token: token)
+            busy = nil
+            model.feedback = error.map(ActionFeedback.failure) ?? .success("Renamed")
+        }
     }
 
     private func presence<T>(_ binding: Binding<T?>) -> Binding<Bool> {
@@ -350,6 +393,8 @@ struct DeviceRow: View {
     let row: PersonDevice
     let reported: Bool
     let now: Date
+    /// A log out or rename of this device is running.
+    var busy = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
@@ -365,10 +410,14 @@ struct DeviceRow: View {
                         .foregroundStyle(Theme.Color.ink)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    (Text(HomeFormat.gigabytes(row.usedGB)).font(Theme.Font.serif(19))
-                        + Text(" GB").font(Theme.Font.text(11, .medium)).foregroundStyle(Theme.Color.stone))
-                        .foregroundStyle(Theme.Color.ink)
-                        .monospacedDigit()
+                    if busy {
+                        ProgressView().tint(Theme.Color.stone)
+                    } else {
+                        (Text(HomeFormat.gigabytes(row.usedGB)).font(Theme.Font.serif(19))
+                            + Text(" GB").font(Theme.Font.text(11, .medium)).foregroundStyle(Theme.Color.stone))
+                            .foregroundStyle(Theme.Color.ink)
+                            .rollingNumber(row.usedGB)
+                    }
                 }
                 HStack(spacing: 8) {
                     Text(row.detail(reported: reported, now: now))
@@ -412,83 +461,90 @@ struct RecentlyDeletedView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var restoring: Set<String> = []
-    @State private var errors: [String: String] = [:]
-    @State private var restored: [String] = []
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                BarRow {
-                    BackButton(title: "People") { dismiss() }
-                } trailing: {
-                    EmptyView()
-                }
-                DotTitle(text: "Recently Deleted", size: 46, dot: .filled, lineLimit: 2)
-                    .padding(.top, 14)
-                if let error = model.deletedError {
-                    Text(error)
-                        .font(Theme.Font.text(13, .medium))
-                        .foregroundStyle(Theme.Color.red)
-                        .padding(.top, 12)
-                }
-                ForEach(restored, id: \.self) { name in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(name) restored").font(Theme.Font.text(14, .semibold)).foregroundStyle(Theme.Color.ink)
-                        Text(RecentlyDeleted.restoredNote).font(Theme.Font.text(13, .medium)).foregroundStyle(Theme.Color.red)
-                    }
-                    .padding(.top, 14)
-                }
-                Rule().padding(.top, 20)
-                if model.deleted.isEmpty {
-                    Text("Nothing here")
-                        .font(Theme.Font.text(14))
-                        .foregroundStyle(Theme.Color.stone)
-                        .padding(.vertical, 16)
-                }
-                let now = Date()
-                ForEach(model.deleted) { item in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .center, spacing: 10) {
-                            Text(item.label)
-                                .font(Theme.Font.text(16.5, .semibold))
-                                .foregroundStyle(Theme.Color.ink)
-                                .lineLimit(1)
-                            Spacer()
-                            if restoring.contains(item.id) {
-                                ProgressView().tint(Theme.Color.stone)
-                            } else {
-                                Button("Restore") { restore(item) }
-                                    .buttonStyle(OutlineButtonStyle())
-                            }
-                        }
-                        Text(RecentlyDeleted.detail(item, now: now))
-                            .font(Theme.Font.text(12.5))
-                            .foregroundStyle(Theme.Color.stone)
-                        if let error = errors[item.id] {
-                            Text(error)
-                                .font(Theme.Font.text(12.5, .medium))
-                                .foregroundStyle(Theme.Color.red)
-                        }
-                    }
-                    .padding(.vertical, 14)
-                    .overlay(alignment: .bottom) { Rule() }
-                }
+        VStack(spacing: 0) {
+            BarRow {
+                BackButton(title: "People") { dismiss() }
+            } trailing: {
+                EmptyView()
             }
             .padding(.horizontal, Theme.gutter)
-            .padding(.bottom, 32)
+            list
         }
         .rfPage()
         .toolbar(.hidden, for: .navigationBar)
     }
 
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                DotTitle(text: "Recently Deleted", size: 46, dot: .filled, lineLimit: 2)
+                    .padding(.top, 14)
+                    .entrance(0)
+                VStack(alignment: .leading, spacing: 0) {
+                    if let error = model.deletedError {
+                        Text(error)
+                            .font(Theme.Font.text(13, .medium))
+                            .foregroundStyle(Theme.Color.red)
+                            .padding(.top, 12)
+                    }
+                    Rule().padding(.top, 20)
+                    if model.deleted.isEmpty {
+                        Text("Nothing here")
+                            .font(Theme.Font.text(14))
+                            .foregroundStyle(Theme.Color.stone)
+                            .padding(.vertical, 16)
+                            .transition(.opacity)
+                    }
+                    rows
+                }
+                .animation(Motion.fade, value: model.deleted.map(\.id))
+                .entrance(1)
+            }
+            .padding(.horizontal, Theme.gutter)
+            .padding(.bottom, 32)
+        }
+        .underPinnedBar()
+    }
+
+    /// A restored person's row leaves with a fade; the rest close up.
+    private var rows: some View {
+        let now = Date()
+        return ForEach(model.deleted) { item in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: 10) {
+                    Text(item.label)
+                        .font(Theme.Font.text(16.5, .semibold))
+                        .foregroundStyle(Theme.Color.ink)
+                        .lineLimit(1)
+                    Spacer()
+                    if restoring.contains(item.id) {
+                        ProgressView().tint(Theme.Color.stone)
+                    } else {
+                        Button("Restore") { restore(item) }
+                            .buttonStyle(OutlineButtonStyle())
+                    }
+                }
+                Text(RecentlyDeleted.detail(item, now: now))
+                    .font(Theme.Font.text(12.5))
+                    .foregroundStyle(Theme.Color.stone)
+            }
+            .padding(.vertical, 14)
+            .overlay(alignment: .bottom) { Rule() }
+            .transition(.opacity)
+        }
+    }
+
     private func restore(_ item: DeletedInvite) {
-        guard let token = appState.currentProfile?.token else { return }
+        guard !restoring.contains(item.id), let token = appState.currentProfile?.token else { return }
         restoring.insert(item.id)
-        errors[item.id] = nil
+        model.feedback = nil
         Task {
             let error = await model.restore(item, token: token)
             restoring.remove(item.id)
-            if let error { errors[item.id] = error } else { restored.append(item.label) }
+            model.feedback = error.map(ActionFeedback.failure)
+                ?? .success("\(item.label) restored", detail: RecentlyDeleted.restoredNote)
         }
     }
 }

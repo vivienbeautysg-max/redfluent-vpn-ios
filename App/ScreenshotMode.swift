@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import UIKit
 
 /// App Store 截图模式。
 ///
@@ -28,6 +29,9 @@ import Foundation
 ///   -RFVOpenDeleted               Owner Admin 里直接进入 Recently Deleted
 ///   -RFVOpenCreateInvite          直接打开 New invite
 ///   -RFVOpenDiagnostics           直接打开 Diagnostics
+///   -RFVMarkedText <文字>         配 -RFVOpenCreateInvite：填好表单，Name 里留一段输入法未上屏的文字（检查所见即所存）
+///   -RFVPrefillCreate             配 -RFVOpenCreateInvite：同样填好表单、键盘停在 Name，但不预先组字（UI 测试用真拼音键盘打字）
+///   -RFVReduceMotion              当作系统开了「减弱动态效果」
 ///   -rfv.appearance dark          深色（UserDefaults 参数域，不写入设置）
 enum ScreenshotMode {
     enum Variant { case member, memberSingapore, memberExpired, memberExpiring, memberSignedOut, activation, owner }
@@ -272,11 +276,33 @@ enum ScreenshotMode {
 
     static let ownerPeriod = UsagePeriod(start: "2026-10-01T00:00:00.000Z", end: "2026-11-01T00:00:00.000Z")
 
-    static func stats(now: Date) -> StatsSnapshot {
+    /// `-RFVFailConnect`: the demo Connect fails ("Can't reach server") instead of connecting.
+    static var failsConnect: Bool { has("-RFVFailConnect") }
+
+    /// The next reading while the demo is connected: speeds and ping move a little, totals grow.
+    static func nextDemoStats(after s: StatsSnapshot) -> StatsSnapshot {
+        let down = Int64.random(in: 3_200_000...14_800_000)
+        let up = Int64.random(in: 600_000...2_900_000)
+        return StatsSnapshot(
+            timestamp: Date(),
+            connected: true,
+            connectionStartedAt: s.connectionStartedAt,
+            uplinkBps: up,
+            downlinkBps: down,
+            totalUp: s.totalUp + up,
+            totalDown: s.totalDown + down,
+            activeConnections: s.activeConnections,
+            proxyConnections: s.proxyConnections,
+            directConnections: s.directConnections,
+            pingMs: Int.random(in: 31...58)
+        )
+    }
+
+    static func stats(now: Date, startedAgo: TimeInterval = 3_720) -> StatsSnapshot {
         StatsSnapshot(
             timestamp: now,
             connected: true,
-            connectionStartedAt: now.addingTimeInterval(-3_720),
+            connectionStartedAt: now.addingTimeInterval(-startedAgo),
             uplinkBps: 1_840_000,
             downlinkBps: 9_620_000,
             totalUp: 486_000_000,
@@ -302,6 +328,84 @@ enum ScreenshotMode {
             outgoingBytes: 486_000_000,
             fetchedAt: now
         )
+    }
+}
+
+/// Fake owner API for screenshot / demo runs: nothing leaves the simulator. It answers like the server, refusals
+/// included (a code that is already in use -> 409 "invite code already exists"), after a short wait so the busy
+/// state shows.
+enum DemoAPI {
+    static let duplicateCode = APIError.status(409, #"{"ok":false,"error":"invite code already exists"}"#)
+
+    private static func wait() async { try? await Task.sleep(nanoseconds: 700_000_000) }
+
+    private static func string(_ value: JSONValue?) -> String? {
+        if case .string(let s) = value { return s } else { return nil }
+    }
+
+    private static func int(_ value: JSONValue?) -> Int? {
+        if case .int(let i) = value { return i } else { return nil }
+    }
+
+    private static func taken(_ code: String, in codes: [String]) -> Bool {
+        codes.contains { $0.caseInsensitiveCompare(code) == .orderedSame }
+    }
+
+    static func createInvite(body: [String: JSONValue], existing: [String]) async throws -> CreatedInvite {
+        await wait()
+        let code = string(body["code"]) ?? ""
+        if taken(code, in: existing) { throw duplicateCode }
+        return CreatedInvite(code: code, label: string(body["label"]) ?? "", maxDevices: int(body["maxDevices"]) ?? 1,
+                             monthlyQuotaGB: int(body["monthlyQuotaGB"]) ?? 200, enabled: true, expiresAt: nil)
+    }
+
+    static func updateInvite(body: [String: JSONValue], invites: [OwnerInvite]) async throws -> OwnerInvite {
+        await wait()
+        let code = string(body["code"]) ?? ""
+        let newCode = string(body["newCode"]) ?? code
+        guard let old = invites.first(where: { $0.code == code }) else { throw APIError.status(404, #"{"ok":false,"error":"invite not found"}"#) }
+        if newCode.caseInsensitiveCompare(code) != .orderedSame,
+           taken(newCode, in: invites.map(\.code)) { throw duplicateCode }
+        var enabled = old.enabled
+        if case .bool(let b) = body["enabled"] { enabled = b }
+        return OwnerInvite(code: newCode, label: string(body["label"]) ?? old.label,
+                           maxDevices: int(body["maxDevices"]) ?? old.maxDevices, activeDevices: old.activeDevices,
+                           monthlyQuotaGB: int(body["monthlyQuotaGB"]) ?? old.monthlyQuotaGB, enabled: enabled,
+                           expiresAt: old.expiresAt, createdAt: old.createdAt)
+    }
+
+    /// Delete, restore, log out, rename: accepted.
+    static func accept() async { await wait() }
+}
+
+extension ScreenshotMode {
+    /// `-RFVMarkedText <text>` (with -RFVOpenCreateInvite): the form is filled in, the keyboard is on Name, and
+    /// <text> is left there as marked text, the way a pinyin keyboard holds a letter it has not turned into a
+    /// character yet.
+    static var markedText: String? { value(after: "-RFVMarkedText") }
+    /// `-RFVPrefillCreate` (with -RFVOpenCreateInvite): the same form, the keyboard on Name, nothing composed yet; a
+    /// UI test then types through the simulator's own Pinyin keyboard, so the composing text is the IME's.
+    static var prefillsCreate: Bool { ProcessInfo.processInfo.arguments.contains("-RFVPrefillCreate") }
+    static let markedFormCode = "RF-DEMO-0100"
+    static let markedFormLabel = "\u{5F20}\u{4E09}"   // 张三
+}
+
+extension ScreenshotMode {
+    /// Finds the text field showing `text`, gives it the keyboard and appends `marked` as marked text.
+    @MainActor
+    static func compose(_ marked: String, inFieldShowing text: String) {
+        func field(in view: UIView) -> UITextField? {
+            if let f = view as? UITextField, f.text == text { return f }
+            for sub in view.subviews { if let f = field(in: sub) { return f } }
+            return nil
+        }
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        guard let target = windows.lazy.compactMap({ field(in: $0) }).first else { return }
+        target.becomeFirstResponder()
+        let end = target.endOfDocument
+        target.selectedTextRange = target.textRange(from: end, to: end)
+        guard !marked.isEmpty else { return }   // -RFVPrefillCreate: the test types through the real keyboard
+        target.setMarkedText(marked, selectedRange: NSRange(location: (marked as NSString).length, length: 0))
     }
 }
 

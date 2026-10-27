@@ -13,29 +13,41 @@ struct DiagnosticsView: View {
     }()
 
     var body: some View {
+        VStack(spacing: 0) {
+            BarRow(title: "") {
+                BarButton(title: "Done", bold: true) { dismiss() }
+            } trailing: {
+                ShareLink(item: diagnosticsText) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(Theme.Color.ink)
+                        .frame(width: 28, height: 28)
+                        .touchTarget(width: 28, height: 28)
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel("Share diagnostics")
+            }
+            .padding(.horizontal, Theme.gutter)
+            details
+        }
+        .rfPage()
+    }
+
+    private var details: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                BarRow(title: "") {
-                    BarButton(title: "Done", bold: true) { dismiss() }
-                } trailing: {
-                    ShareLink(item: diagnosticsText) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(Theme.Color.ink)
-                    }
-                    .accessibilityLabel("Share diagnostics")
-                }
                 DotTitle(text: "Diagnostics", size: 46, dot: .filled)
                     .padding(.top, 14)
+                    .entrance(0)
 
-                section("Tunnel") {
+                section("Tunnel", order: 1) {
                     row("Status", tunnelManager.status.displayName)
                     row("Server", appState.serverDisplayName(connected: tunnelManager.status == .connected) ?? HomeFormat.none)
                     row("Mode", "Secure Tunnel")
                 }
 
                 if let profile = appState.currentProfile {
-                    section("Activation") {
+                    section("Activation", order: 2) {
                         row("Owner", profile.ownerLabel)
                         row("Profile", profile.profileId, mono: true)
                         row("Config", profile.configVersion, mono: true)
@@ -43,13 +55,13 @@ struct DiagnosticsView: View {
                     }
                 }
 
-                section("Device") {
+                section("Device", order: 3) {
                     row("Public ID", publicID, mono: true)
                     row("App", DeviceIdentity.appVersion, mono: true)
                     row("Fonts", fontsText, mono: true)
                 }
 
-                section("Live stats") {
+                section("Live stats", order: 4) {
                     if let snap = statsStore.snapshot {
                         row("Timestamp", Self.tsFormatter.string(from: snap.timestamp), mono: true)
                         row("Active conns", "\(snap.activeConnections)", mono: true)
@@ -66,7 +78,7 @@ struct DiagnosticsView: View {
                     }
                 }
 
-                section("Last error") {
+                section("Last error", order: 5) {
                     Text(tunnelManager.lastError ?? appState.lastActivationError ?? "None")
                         .font(Theme.Font.text(14))
                         .foregroundStyle((tunnelManager.lastError ?? appState.lastActivationError) == nil ? Theme.Color.stone : Theme.Color.red)
@@ -78,7 +90,7 @@ struct DiagnosticsView: View {
             .padding(.horizontal, Theme.gutter)
             .padding(.bottom, 32)
         }
-        .rfPage()
+        .underPinnedBar()
     }
 
     /// This install's public device id; a placeholder in screenshots.
@@ -94,13 +106,14 @@ struct DiagnosticsView: View {
         return "\(AppFonts.all.count - missing.count)/\(AppFonts.all.count)"
     }
 
-    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func section<Content: View>(_ title: String, order: Int, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             SectionLabel(text: title).padding(.bottom, 2)
             Rule()
             content()
         }
         .padding(.top, 26)
+        .entrance(order)
     }
 
     private func row(_ label: String, _ value: String, mono: Bool = false, color: Color = Theme.Color.ink) -> some View {

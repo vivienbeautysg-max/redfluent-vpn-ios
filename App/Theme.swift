@@ -58,6 +58,8 @@ enum Theme {
     }
 
     static let gutter: CGFloat = 24
+    /// The top bar of sheets and pushed pages (BarRow), pinned above their scrolling content.
+    static let barHeight: CGFloat = 46
 }
 
 extension UIColor {
@@ -131,5 +133,6 @@ private struct SheetTheme: ViewModifier {
             .presentationBackground(Theme.Color.paper)
             .preferredColorScheme(Appearance.from(appearanceRaw).colorScheme)
             .tint(Theme.Color.red)
+            .modifier(MotionEnvironment())
     }
 }

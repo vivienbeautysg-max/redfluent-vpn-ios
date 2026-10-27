@@ -20,6 +20,7 @@ struct RedFluentVPNApp: App {
                 .environmentObject(quotaStore)
                 .preferredColorScheme(Appearance.from(appearanceRaw).colorScheme)
                 .tint(Theme.Color.red)
+                .modifier(MotionEnvironment())
                 .onChange(of: appState.selectedRegionID) { _, _ in
                     // Any change of the selection (picker, or a server-side reset): reconnect when
                     // connected, otherwise keep the saved tunnel configuration in step with it.

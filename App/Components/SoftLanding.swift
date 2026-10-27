@@ -113,7 +113,7 @@ struct MoreGlyph: View {
         }
         .frame(width: 36, height: 36)
         .overlay(Circle().strokeBorder(Theme.Color.rule, lineWidth: 1))
-        .contentShape(Circle())
+        .touchTarget(width: 36, height: 36)
     }
 }
 
@@ -159,7 +159,19 @@ struct BarRow<Leading: View, Trailing: View>: View {
                 trailing
             }
         }
-        .frame(height: 46)
+        .frame(height: Theme.barHeight)
+    }
+}
+
+extension View {
+    /// The scrolling part under a pinned BarRow: content passing under the bar fades out over 12 pt instead of
+    /// being cut off by a hard edge.
+    func underPinnedBar() -> some View {
+        overlay(alignment: .top) {
+            LinearGradient(colors: [Theme.Color.paper, Theme.Color.paper.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: 12)
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -175,9 +187,9 @@ struct BarButton: View {
             Text(title)
                 .font(Theme.Font.text(16.5, bold ? .semibold : .medium))
                 .foregroundStyle(enabled ? Theme.Color.red : Theme.Color.stone)
-                .contentShape(Rectangle())
+                .touchTarget(width: 30, height: 20)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .disabled(!enabled)
     }
 }
@@ -194,9 +206,9 @@ struct BackButton: View {
                 Text(title).font(Theme.Font.text(16.5, .medium))
             }
             .foregroundStyle(Theme.Color.red)
-            .contentShape(Rectangle())
+            .touchTarget(height: 20)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .accessibilityLabel("Back to \(title)")
     }
 }
@@ -210,7 +222,9 @@ struct PrimaryButtonStyle: ButtonStyle {
             .font(Theme.Font.text(16, .semibold))
             .foregroundStyle(Theme.Color.onRed)
             .frame(maxWidth: .infinity, minHeight: 52)
-            .background(Capsule().fill(Theme.Color.red.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)))
+            .background(Capsule().fill(Theme.Color.red.opacity(enabled ? 1 : 0.4)))
+            .contentShape(Capsule())
+            .pressEffect(configuration.isPressed && enabled)
     }
 }
 
@@ -225,15 +239,19 @@ struct OutlineButtonStyle: ButtonStyle {
             .padding(.horizontal, 14)
             .frame(minHeight: 34)
             .overlay(Capsule().strokeBorder(color, lineWidth: 1.5))
-            .opacity(configuration.isPressed ? 0.6 : 1)
+            .touchTarget(height: 34)
+            .pressEffect(configuration.isPressed)
     }
 }
 
-/// Choice between a few options: an outlined capsule with the chosen part filled in Ink.
+/// Choice between a few options: an outlined capsule with the chosen part filled in Ink. The filled pill slides to
+/// the new option on a spring (Reduce Motion: it fades over instead).
 struct SegmentedChoice<Value: Hashable>: View {
     let options: [(value: Value, title: String)]
     @Binding var selection: Value
     var enabled = true
+    @Namespace private var pill
+    @Environment(\.rfReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -241,17 +259,19 @@ struct SegmentedChoice<Value: Hashable>: View {
                 let option = options[i]
                 let on = option.value == selection
                 Button {
-                    selection = option.value
+                    guard !on else { return }
+                    Haptics.select()
+                    withAnimation(reduceMotion ? Motion.fade : Motion.slide) { selection = option.value }
                 } label: {
                     Text(option.title)
                         .font(Theme.Font.text(14, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.Color.paper : Theme.Color.ink)
                         .padding(.horizontal, 14)
                         .frame(minHeight: 32)
-                        .background(Capsule().fill(on ? Theme.Color.ink : .clear))
-                        .contentShape(Capsule())
+                        .background { fill(on) }
+                        .touchTarget(height: 32)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
@@ -259,6 +279,15 @@ struct SegmentedChoice<Value: Hashable>: View {
         .overlay(Capsule().strokeBorder(Theme.Color.rule, lineWidth: 1))
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
+    }
+
+    @ViewBuilder
+    private func fill(_ on: Bool) -> some View {
+        if reduceMotion {
+            Capsule().fill(Theme.Color.ink).opacity(on ? 1 : 0)
+        } else if on {
+            Capsule().fill(Theme.Color.ink).matchedGeometryEffect(id: "pill", in: pill)
+        }
     }
 }
 
@@ -272,8 +301,8 @@ struct NumberStepper: View {
             step("minus", enabled: value > range.lowerBound) { value = max(range.lowerBound, value - 1) }
             Text("\(value)")
                 .font(Theme.Font.serif(20))
-                .monospacedDigit()
                 .foregroundStyle(Theme.Color.ink)
+                .rollingNumber(value)
                 .frame(minWidth: 28)
             step("plus", enabled: value < range.upperBound) { value = min(range.upperBound, value + 1) }
         }
@@ -286,9 +315,9 @@ struct NumberStepper: View {
                 .foregroundStyle(enabled ? Theme.Color.ink : Theme.Color.stone)
                 .frame(width: 32, height: 32)
                 .overlay(Circle().strokeBorder(Theme.Color.rule, lineWidth: 1))
-                .contentShape(Circle())
+                .touchTarget(width: 32, height: 32)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .disabled(!enabled)
         .accessibilityLabel(symbol == "plus" ? "Increase" : "Decrease")
     }
@@ -338,22 +367,58 @@ struct ThemedField: View {
 struct QuotaField: View {
     @Binding var text: String
     var focused: FocusState<Bool>.Binding
+    @Environment(\.rfReduceMotion) private var reduceMotion
+
+    private var problem: QuotaInput.Problem? {
+        if case .failure(let problem) = QuotaInput.parse(text) { return problem }
+        return nil
+    }
+
+    /// While typing, the keyboard covers the quick values row, so what is wrong shows in place of the label (the row
+    /// the system keeps above the keyboard); otherwise it sits at the end of the quick values. A field emptied to
+    /// type a new figure is not flagged while it is being typed in.
+    private var rowProblem: String? {
+        guard focused.wrappedValue, let problem, problem != .empty else { return nil }
+        return problem.message
+    }
+    private var chipsProblem: String? { focused.wrappedValue ? nil : problem?.message }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Text("Monthly limit")
-                    .font(Theme.Font.text(15, .medium))
-                    .foregroundStyle(Theme.Color.ink)
-                    .fixedSize()
+                ZStack(alignment: .leading) {
+                    if let rowProblem {
+                        problemLine(rowProblem)
+                    } else {
+                        Text("Monthly limit")
+                            .font(Theme.Font.text(15, .medium))
+                            .foregroundStyle(Theme.Color.ink)
+                            .fixedSize()
+                            .transition(.opacity)
+                    }
+                }
+                .animation(reduceMotion ? Motion.fade : .easeOut(duration: 0.2), value: rowProblem)
                 Spacer(minLength: 8)
-                TextField("", text: $text, prompt: Text("200").foregroundStyle(Theme.Color.stone))
+                // While typing, the field shows its own text. Otherwise the same figure is drawn over it as text, so
+                // a quick value rolls in; the field underneath still takes the tap.
+                TextField("", text: $text, prompt: Text(focused.wrappedValue ? "200" : "").foregroundStyle(Theme.Color.stone))
                     .font(Theme.Font.serif(22))
-                    .foregroundStyle(Theme.Color.ink)
+                    .foregroundStyle(focused.wrappedValue ? Theme.Color.ink : Color.clear)
                     .multilineTextAlignment(.trailing)
                     .keyboardType(.numberPad)
                     .focused(focused)
                     .frame(maxWidth: 110)
+                    .overlay(alignment: .trailing) {
+                        if !focused.wrappedValue {
+                            Text(text.isEmpty ? "200" : text)
+                                .font(Theme.Font.serif(22))
+                                .foregroundStyle(text.isEmpty ? Theme.Color.stone : Theme.Color.ink)
+                                .lineLimit(1)
+                                .rollingNumber(text)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     .accessibilityLabel("Monthly limit in GB")
                 Text("GB")
                     .font(Theme.Font.text(14, .medium))
@@ -363,31 +428,57 @@ struct QuotaField: View {
                 ForEach(QuotaInput.presets, id: \.self) { gb in
                     let on = QuotaInput.parse(text) == .success(gb)
                     Button {
-                        text = String(gb)
+                        pick(gb)
                     } label: {
                         Text("\(gb)")
                             .font(Theme.Font.text(14, on ? .semibold : .medium))
                             .foregroundStyle(on ? Theme.Color.paper : Theme.Color.ink)
                             .frame(minWidth: 52, minHeight: 32)
-                            .background(Capsule().fill(on ? Theme.Color.ink : .clear))
-                            .overlay(Capsule().strokeBorder(on ? .clear : Theme.Color.rule, lineWidth: 1))
-                            .contentShape(Capsule())
+                            .background(Capsule().fill(Theme.Color.ink).opacity(on ? 1 : 0))
+                            .overlay(Capsule().strokeBorder(Theme.Color.rule, lineWidth: 1).opacity(on ? 0 : 1))
+                            .animation(Motion.fill, value: on)
+                            .touchTarget(height: 32)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressStyle())
                     .accessibilityLabel("\(gb) GB")
+                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
                 Spacer(minLength: 0)
-                if case .failure(let problem) = QuotaInput.parse(text) {
-                    Text(problem.message)
-                        .font(Theme.Font.text(12.5, .medium))
-                        .foregroundStyle(Theme.Color.red)
-                        .lineLimit(1)
-                        .fixedSize()
+                ZStack(alignment: .trailing) {
+                    if let chipsProblem {
+                        problemLine(chipsProblem)
+                    }
                 }
+                .animation(reduceMotion ? Motion.fade : .easeOut(duration: 0.2), value: chipsProblem)
             }
         }
         .padding(.vertical, 12)
         .overlay(alignment: .bottom) { Rule() }
+    }
+
+    /// What is wrong, in red: fades in rising 4 pt (Reduce Motion: fades), leaves in 150 ms.
+    private func problemLine(_ message: String) -> some View {
+        Text(message)
+            .font(Theme.Font.text(12.5, .medium))
+            .foregroundStyle(Theme.Color.red)
+            .lineLimit(1)
+            .fixedSize()
+            .id(message)
+            .transition(.asymmetric(
+                insertion: reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4)),
+                removal: .opacity.animation(Motion.bannerOut)))
+    }
+
+    /// A quick value is a complete answer: the keyboard goes, then the figure rolls to it.
+    private func pick(_ gb: Int) {
+        guard QuotaInput.parse(text) != .success(gb) else { return }
+        Haptics.select()
+        if focused.wrappedValue {
+            focused.wrappedValue = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { text = String(gb) }
+        } else {
+            text = String(gb)
+        }
     }
 }
 
@@ -413,7 +504,7 @@ struct InviteAccessRows: View {
         if showsAccess {
             SettingRow(label: "Access") {
                 Menu {
-                    Picker("Access", selection: $access.preset) {
+                    Picker("Access", selection: presetBinding) {
                         ForEach(AccessPreset.allCases) { preset in
                             Text(preset.label).tag(preset)
                         }
@@ -425,7 +516,10 @@ struct InviteAccessRows: View {
                         Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundStyle(Theme.Color.ink)
+                    .touchTarget(height: 20)
                 }
+                .menuStyle(.button)
+                .buttonStyle(PressStyle())
             }
             if access.preset == .custom {
                 SettingRow(label: "Days") {
@@ -444,6 +538,15 @@ struct InviteAccessRows: View {
                 .foregroundStyle(status.tone.color)
                 .padding(.top, 8)
         }
+    }
+
+    /// A different Access choice: the selection tick, and the Days row (Custom) fades in instead of popping.
+    private var presetBinding: Binding<AccessPreset> {
+        Binding(get: { access.preset }, set: { preset in
+            guard preset != access.preset else { return }
+            Haptics.select()
+            withAnimation(Motion.fade) { access.preset = preset }
+        })
     }
 }
 
@@ -484,7 +587,12 @@ struct DipLine: Shape {
 }
 
 /// The line + dot. `landed` (connected): the dot rests in the dip with a glow; otherwise it hovers above a
-/// straight line with a soft shadow. Drawn on the design's 390 x 236 grid, scaled to `height`.
+/// straight line with a soft shadow. `pulsing` (connecting / disconnecting): the glow and a ring breathe around the
+/// hovering dot. Drawn on the design's 390 x 236 grid, scaled to `height`.
+///
+/// Motion: landing is a soft spring that carries the dip with it and the glow blooms in over 400 ms; lifting off
+/// (disconnect) takes 250 ms. Held down (PowerPressStyle), the dot alone shrinks to 0.94. Reduce Motion: nothing
+/// travels or grows; the two resting states cross-fade and the breathing is a fade.
 struct LandingArt: View {
     var landed: Bool
     var glowing: Bool = false
@@ -492,55 +600,109 @@ struct LandingArt: View {
     var height: CGFloat = 236
     var showsPower = true
 
-    @State private var pulse = false
+    @Environment(\.rfPressed) private var pressed
+    @Environment(\.rfReduceMotion) private var reduceMotion
 
     private var k: CGFloat { height / 236 }
 
     var body: some View {
         GeometryReader { geo in
             let cx = geo.size.width / 2
-            let dotY = (landed ? 116 : 62) * k
             ZStack {
-                if glowing {
-                    Circle()
-                        .fill(RadialGradient(colors: [Theme.Color.glow, Theme.Color.glow.opacity(0)],
-                                             center: .center, startRadius: 0, endRadius: 112 * k))
-                        .frame(width: 224 * k, height: 224 * k)
-                        .position(x: cx, y: 116 * k)
+                LandingGlow(k: k)
+                    .scaleEffect(glowing || reduceMotion ? 1 : 0.6)
+                    .opacity(glowing ? 1 : 0)
+                    .position(x: cx, y: 116 * k)
+                    .animation(glowing ? .easeOut(duration: 0.4) : .easeIn(duration: 0.25), value: glowing)
+                if pulsing {
+                    Breathing(k: k, reduceMotion: reduceMotion)
+                        .position(x: cx, y: dotY(landed: landed))
                         .transition(.opacity)
                 }
-                Ellipse()
-                    .fill(Theme.Color.ink.opacity(landed ? 0 : 0.18))
-                    .frame(width: 88 * k, height: 10 * k)
-                    .blur(radius: 5 * k)
-                    .position(x: cx, y: 136 * k)
-                DipLine(depth: landed ? 1 : 0, lineY: 141.7 * k, scale: k)
-                    .stroke(Theme.Color.ink, style: StrokeStyle(lineWidth: 8 * k, lineCap: .round))
-                if pulsing {
-                    Circle()
-                        .strokeBorder(Theme.Color.red.opacity(0.5), lineWidth: 2)
-                        .frame(width: 108 * k, height: 108 * k)
-                        .scaleEffect(pulse ? 1.35 : 1)
-                        .opacity(pulse ? 0 : 1)
-                        .position(x: cx, y: dotY)
-                        .onAppear { withAnimation(.easeOut(duration: 1.2).repeatForever(autoreverses: false)) { pulse = true } }
-                        .onDisappear { pulse = false }
+                if reduceMotion {
+                    scene(landed: false, cx: cx).opacity(landed ? 0 : 1)
+                    scene(landed: true, cx: cx).opacity(landed ? 1 : 0)
+                } else {
+                    scene(landed: landed, cx: cx)
                 }
-                Circle()
-                    .fill(Theme.Color.red)
-                    .frame(width: 108 * k, height: 108 * k)
-                    .overlay {
-                        if showsPower {
-                            Image(systemName: "power")
-                                .font(.system(size: 34 * k, weight: .medium))
-                                .foregroundStyle(Theme.Color.onRed)
-                        }
-                    }
-                    .position(x: cx, y: dotY)
             }
         }
         .frame(height: height)
-        .animation(.spring(response: 0.62, dampingFraction: 0.62), value: landed)
-        .animation(.easeInOut(duration: 0.4), value: glowing)
+        .animation(landing, value: landed)
+        .animation(Motion.fade, value: pulsing)
+    }
+
+    private var landing: Animation {
+        if reduceMotion { return .easeInOut(duration: 0.25) }
+        return landed ? .spring(response: 0.55, dampingFraction: 0.7) : .easeInOut(duration: 0.25)
+    }
+
+    private func dotY(landed: Bool) -> CGFloat { (landed ? 116 : 62) * k }
+
+    @ViewBuilder
+    private func scene(landed: Bool, cx: CGFloat) -> some View {
+        // The soft shadow under the hovering dot: blurred once, only its opacity changes.
+        Ellipse()
+            .fill(Theme.Color.ink.opacity(0.18))
+            .frame(width: 88 * k, height: 10 * k)
+            .blur(radius: 5 * k)
+            .opacity(landed ? 0 : 1)
+            .position(x: cx, y: 136 * k)
+        DipLine(depth: landed ? 1 : 0, lineY: 141.7 * k, scale: k)
+            .stroke(Theme.Color.ink, style: StrokeStyle(lineWidth: 8 * k, lineCap: .round))
+        Circle()
+            .fill(Theme.Color.red)
+            .frame(width: 108 * k, height: 108 * k)
+            .overlay {
+                if showsPower {
+                    Image(systemName: "power")
+                        .font(.system(size: 34 * k, weight: .medium))
+                        .foregroundStyle(Theme.Color.onRed)
+                }
+            }
+            .scaleEffect(pressed && !reduceMotion ? Motion.powerScale : 1)
+            .opacity(pressed && reduceMotion ? 0.7 : 1)
+            .animation(reduceMotion ? Motion.fade : Motion.press, value: pressed)
+            .position(x: cx, y: dotY(landed: landed))
+    }
+}
+
+/// The red glow, rendered once into its own layer (drawingGroup), so scaling and fading it costs no redraw.
+private struct LandingGlow: View {
+    let k: CGFloat
+
+    var body: some View {
+        Circle()
+            .fill(RadialGradient(colors: [Theme.Color.glow, Theme.Color.glow.opacity(0)],
+                                 center: .center, startRadius: 0, endRadius: 112 * k))
+            .frame(width: 224 * k, height: 224 * k)
+            .drawingGroup()
+    }
+}
+
+/// Connecting: the glow and a thin ring around the dot breathe in and out, one breath every 1.2 s (0.6 s each way,
+/// ease in-out). Reduce Motion: the glow only fades, it does not grow; no ring.
+private struct Breathing: View {
+    let k: CGFloat
+    let reduceMotion: Bool
+
+    var body: some View {
+        PhaseAnimator([false, true]) { inhale in
+            ZStack {
+                LandingGlow(k: k)
+                    .scaleEffect(reduceMotion ? 0.8 : (inhale ? 0.86 : 0.7))
+                    .opacity(inhale ? 0.95 : 0.35)
+                if !reduceMotion {
+                    Circle()
+                        .strokeBorder(Theme.Color.red.opacity(0.45), lineWidth: 2)
+                        .frame(width: 108 * k, height: 108 * k)
+                        .scaleEffect(inhale ? 1.2 : 1.04)
+                        .opacity(inhale ? 0.7 : 0.15)
+                }
+            }
+        } animation: { _ in
+            .easeInOut(duration: 0.6)
+        }
+        .allowsHitTesting(false)
     }
 }

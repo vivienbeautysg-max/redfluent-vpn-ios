@@ -18,6 +18,8 @@ final class OwnerAdminViewModel: ObservableObject {
     @Published var deletedError: String?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// The answer to the last action on any Owner Admin page; one banner above the whole stack shows it.
+    @Published var feedback: ActionFeedback?
 
     /// This app's own device: its invite is the owner's (the old fixed owner code was rotated away, but is
     /// still recognised).
@@ -98,6 +100,9 @@ final class OwnerAdminViewModel: ObservableObject {
 
     /// Saves a change. nil on success, otherwise the server's reason.
     func updateInvite(_ body: [String: JSONValue], token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { return await demoUpdate(body) }
+        #endif
         do {
             _ = try await api.updateOwnerInvite(body: body, token: token)
         } catch {
@@ -132,6 +137,9 @@ final class OwnerAdminViewModel: ObservableObject {
 
     /// nil on success, otherwise the reason.
     func deleteInvite(_ invite: OwnerInvite, token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { await demoDelete(invite); return nil }
+        #endif
         do {
             _ = try await api.deleteOwnerInvite(invite, token: token)
         } catch {
@@ -145,6 +153,9 @@ final class OwnerAdminViewModel: ObservableObject {
 
     /// nil on success, otherwise what to say (404 / 409 / 403 have their own short texts).
     func restore(_ invite: DeletedInvite, token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { await demoRestore(invite); return nil }
+        #endif
         do {
             try await api.restoreInvite(code: invite.code, token: token)
         } catch {
@@ -157,6 +168,9 @@ final class OwnerAdminViewModel: ObservableObject {
     }
 
     func renameDevice(_ device: OwnerDevice, displayName: String, token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { await DemoAPI.accept(); return nil }
+        #endif
         do {
             _ = try await api.renameOwnerDevice(profileId: device.profileId, displayName: displayName, token: token)
         } catch {
@@ -167,6 +181,9 @@ final class OwnerAdminViewModel: ObservableObject {
     }
 
     func revokeDevice(_ device: OwnerDevice, token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { await DemoAPI.accept(); return nil }
+        #endif
         do {
             _ = try await api.revokeOwnerDevice(profileId: device.profileId, token: token)
         } catch {
@@ -181,6 +198,9 @@ final class OwnerAdminViewModel: ObservableObject {
     /// without it answers 404, and then each enabled device is signed out with the per-device revoke.
     /// nil when everything worked, otherwise the (last) reason.
     func logOutAll(code: String, token: String) async -> String? {
+        #if DEBUG
+        if ScreenshotMode.isOn { await DemoAPI.accept(); return nil }
+        #endif
         var failure: String?
         do {
             _ = try await api.logoutOwnerUser(code: code, token: token)
@@ -199,6 +219,38 @@ final class OwnerAdminViewModel: ObservableObject {
         await refreshInvites(token: token)
         return failure
     }
+
+    #if DEBUG
+    // Screenshot / demo runs: the fake API answers and the demo data changes the way the server's would.
+
+    private func demoUpdate(_ body: [String: JSONValue]) async -> String? {
+        do {
+            let updated = try await DemoAPI.updateInvite(body: body, invites: invites)
+            guard case .string(let old) = body["code"], let i = invites.firstIndex(where: { $0.code == old }) else { return nil }
+            invites[i] = updated
+            if old != updated.code { inviteAccess[updated.code] = inviteAccess.removeValue(forKey: old) }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func demoDelete(_ invite: OwnerInvite) async {
+        await DemoAPI.accept()
+        invites.removeAll { $0.code == invite.code }
+        devices.removeAll { $0.inviteCode == invite.code }
+        deleted.insert(DeletedInvite(code: invite.code, label: invite.label, deletedAt: ISO8601DateFormatter().string(from: Date()),
+                                     maxDevices: invite.maxDevices, monthlyQuotaGB: invite.monthlyQuotaGB,
+                                     region: inviteAccess[invite.code]?.region, deviceCount: invite.activeDevices), at: 0)
+    }
+
+    private func demoRestore(_ item: DeletedInvite) async {
+        await DemoAPI.accept()
+        deleted.removeAll { $0.code == item.code }
+        invites.append(OwnerInvite(code: item.code, label: item.label, maxDevices: item.maxDevices ?? 1, activeDevices: 0,
+                                   monthlyQuotaGB: item.monthlyQuotaGB, enabled: true, expiresAt: nil, createdAt: nil))
+    }
+    #endif
 }
 
 enum AdminRoute: Hashable {
@@ -218,43 +270,30 @@ struct OwnerAdminView: View {
     @State private var tab: AdminTab = .people
     @State private var path: [AdminRoute] = []
     @State private var showingCreateInvite = false
+    @Namespace private var tabUnderline
+    @Environment(\.rfReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationStack(path: $path) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    BarRow(title: "Owner Admin") {
-                        BarButton(title: "Done", bold: true) { dismiss() }
-                    } trailing: {
-                        HStack(spacing: 20) {
+            VStack(spacing: 0) {
+                BarRow(title: "Owner Admin") {
+                    BarButton(title: "Done", bold: true) { dismiss() }
+                } trailing: {
+                    HStack(spacing: 20) {
+                        if model.isLoading {
+                            ProgressView().tint(Theme.Color.stone).frame(width: 28, height: 28)
+                        } else {
                             iconButton("arrow.clockwise", label: "Refresh") { Task { await refresh() } }
-                            iconButton("plus", label: "New invite") { showingCreateInvite = true }
                         }
-                    }
-                    header
-                    tabs
-                    if let error = model.errorMessage {
-                        Text(error)
-                            .font(Theme.Font.text(13, .medium))
-                            .foregroundStyle(Theme.Color.red)
-                            .padding(.top, 12)
-                    }
-                    switch tab {
-                    case .people: peopleList
-                    case .events: eventsList
+                        iconButton("plus", label: "New invite") { showingCreateInvite = true }
                     }
                 }
                 .padding(.horizontal, Theme.gutter)
-                .padding(.bottom, 28)
-            }
-            .refreshable { await refresh() }
-            .overlay {
-                if model.isLoading && model.invites.isEmpty {
-                    ProgressView().controlSize(.large).tint(Theme.Color.stone)
-                }
+                list
             }
             .rfPage()
             .toolbar(.hidden, for: .navigationBar)
+            .edgeSwipeBack()
             .navigationDestination(for: AdminRoute.self) { route in
                 switch route {
                 case .person(let code):
@@ -266,6 +305,8 @@ struct OwnerAdminView: View {
                 }
             }
         }
+        // One banner for every Owner Admin page, below their pinned bars; it stays put through a push or pop.
+        .actionBanner($model.feedback, topInset: Theme.barHeight + 6)
         .sheet(isPresented: $showingCreateInvite, onDismiss: { Task { await refresh() } }) {
             CreateInviteView()
                 .environmentObject(appState)
@@ -283,11 +324,54 @@ struct OwnerAdminView: View {
         }
     }
 
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                    .entrance(0)
+                tabs
+                    .entrance(1)
+                VStack(alignment: .leading, spacing: 0) {
+                    if let error = model.errorMessage {
+                        Text(error)
+                            .font(Theme.Font.text(13, .medium))
+                            .foregroundStyle(Theme.Color.red)
+                            .padding(.top, 12)
+                            .transition(reduceMotion ? .opacity : .notice)
+                    }
+                    // People <-> Events: the lists cross-fade.
+                    ZStack(alignment: .topLeading) {
+                        switch tab {
+                        case .people: VStack(alignment: .leading, spacing: 0) { peopleList }.transition(.opacity)
+                        case .events: VStack(alignment: .leading, spacing: 0) { eventsList }.transition(.opacity)
+                        }
+                    }
+                }
+                .animation(Motion.fade, value: model.errorMessage)
+                .entrance(2)
+            }
+            .padding(.horizontal, Theme.gutter)
+            .padding(.bottom, 28)
+        }
+        .refreshable { await refresh() }
+        .underPinnedBar()
+        .overlay {
+            if model.isLoading && model.invites.isEmpty {
+                ProgressView().controlSize(.large).tint(Theme.Color.stone)
+            }
+        }
+    }
+
     // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .bottom) {
-            DotTitle(text: tab.rawValue, size: 46, dot: .filled)
+            ZStack(alignment: .leading) {
+                DotTitle(text: tab.rawValue, size: 46, dot: .filled)
+                    .id(tab)
+                    .transition(reduceMotion ? .opacity : .titleSwap)
+            }
+            .animation(.easeInOut(duration: 0.3), value: tab)
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 countLine(counts.0, counts.1)
@@ -313,31 +397,42 @@ struct OwnerAdminView: View {
     private func countLine(_ n: Int, _ word: String) -> some View {
         (Text("\(n) ").font(Theme.Font.text(13, .semibold)).foregroundStyle(Theme.Color.ink)
             + Text(word).font(Theme.Font.text(13, .medium)).foregroundStyle(Theme.Color.stone))
+            .rollingNumber(n)
     }
 
+    /// People / Events: the red underline slides to the chosen tab (Reduce Motion: it fades over).
     private var tabs: some View {
         HStack(spacing: 26) {
             ForEach(AdminTab.allCases) { option in
                 let on = option == tab
                 Button {
-                    tab = option
+                    guard !on else { return }
+                    Haptics.select()
+                    withAnimation(reduceMotion ? Motion.fade : Motion.slide) { tab = option }
                 } label: {
                     Text(option.rawValue)
                         .font(Theme.Font.text(15, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.Color.ink : Theme.Color.stone)
                         .padding(.bottom, 12)
-                        .overlay(alignment: .bottom) {
-                            Rectangle().fill(on ? Theme.Color.red : .clear).frame(height: 2)
-                        }
-                        .contentShape(Rectangle())
+                        .overlay(alignment: .bottom) { underline(on) }
+                        .touchTarget(height: 32)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressStyle())
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
             Spacer()
         }
         .padding(.top, 20)
         .overlay(alignment: .bottom) { Rule() }
+    }
+
+    @ViewBuilder
+    private func underline(_ on: Bool) -> some View {
+        if reduceMotion {
+            Rectangle().fill(Theme.Color.red).frame(height: 2).opacity(on ? 1 : 0)
+        } else if on {
+            Rectangle().fill(Theme.Color.red).frame(height: 2).matchedGeometryEffect(id: "underline", in: tabUnderline)
+        }
     }
 
     // MARK: - People
@@ -356,7 +451,7 @@ struct OwnerAdminView: View {
             NavigationLink(value: AdminRoute.person(person.code)) {
                 PersonRow(person: person, now: now)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RowPressStyle())
         }
         if model.deletedSupported {
             NavigationLink(value: AdminRoute.deleted) {
@@ -364,7 +459,7 @@ struct OwnerAdminView: View {
                     Image(systemName: "trash").font(.system(size: 13, weight: .medium))
                     Text("Recently Deleted").font(Theme.Font.text(15, .medium))
                     Spacer()
-                    Text("\(model.deleted.count)").font(Theme.Font.text(14))
+                    Text("\(model.deleted.count)").font(Theme.Font.text(14)).rollingNumber(model.deleted.count)
                     Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundStyle(Theme.Color.stone)
@@ -372,7 +467,7 @@ struct OwnerAdminView: View {
                 .contentShape(Rectangle())
                 .overlay(alignment: .bottom) { Rule() }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RowPressStyle())
             .padding(.top, 8)
         }
     }
@@ -398,9 +493,9 @@ struct OwnerAdminView: View {
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(Theme.Color.ink)
                 .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
+                .touchTarget(width: 28, height: 28)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
         .accessibilityLabel(label)
     }
 
@@ -434,7 +529,7 @@ private struct PersonRow: View {
                     (Text(HomeFormat.gigabytes(person.usedGB)).font(Theme.Font.serif(19))
                         + Text(" GB").font(Theme.Font.text(11, .medium)).foregroundStyle(Theme.Color.stone))
                         .foregroundStyle(Theme.Color.ink)
-                        .monospacedDigit()
+                        .rollingNumber(person.usedGB)
                 }
                 HStack(spacing: 8) {
                     Text(person.summary(now: now))

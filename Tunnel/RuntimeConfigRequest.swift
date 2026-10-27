@@ -50,6 +50,15 @@ enum RuntimeConfigRequest {
         return echoed.lowercased() == region.lowercased()
     }
 
+    /// `runtimeMeta.ipv4Blocked` of a 200 answer: the region's IPv4 entry is blocked in China right now. nil when
+    /// the backend does not say (an older backend), or says it with anything but a JSON true / false.
+    static func ipv4Blocked(in response: [String: Any]) -> Bool? {
+        guard let meta = response["runtimeMeta"] as? [String: Any],
+              let value = meta["ipv4Blocked"] as? NSNumber,
+              CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+        return value.boolValue
+    }
+
     /// The server's reason from an error body such as {"ok":false,"error":"region not allowed"}.
     static func serverReason(from body: Data) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],

@@ -147,6 +147,9 @@ enum RegionStore {
     /// Written by the extension on every start: ["id": ..., "name": ...].
     /// Must stay identical to SharedContainer.activeRegionKey in the tunnel target.
     static let activeKey = "rfv.region.active"
+    /// Written by the extension after each runtime config: [region id: runtimeMeta.ipv4Blocked].
+    /// Must stay identical to SharedContainer.ipv4BlockedKey in the tunnel target.
+    static let ipv4BlockedKey = "rfv.region.ipv4Blocked"
 
     /// nil when the App Group suite is unavailable. The extension uses the very same suite and
     /// there is no fallback to private defaults, so the two sides can never silently disagree:
@@ -166,6 +169,12 @@ enum RegionStore {
 
     static func saveSelected(_ id: String, to d: UserDefaults? = sharedDefaults()) {
         d?.set(id, forKey: selectedKey)
+    }
+
+    /// What the last runtime config for this region said about its IPv4 entry being blocked; nil when it did not say.
+    static func ipv4Blocked(regionID: String?, _ d: UserDefaults? = sharedDefaults()) -> Bool? {
+        guard let regionID, let map = d?.dictionary(forKey: ipv4BlockedKey) else { return nil }
+        return map[regionID.lowercased()] as? Bool
     }
 
     /// Last region list the server sent, so the picker is right on a cold start.

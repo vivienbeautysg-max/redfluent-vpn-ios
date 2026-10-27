@@ -4,6 +4,7 @@ struct InviteActivationView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @State private var inviteCode: String = ""
+    @State private var feedback: ActionFeedback?
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -13,11 +14,14 @@ struct InviteActivationView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Wordmark()
                         .frame(height: 50)
+                        .entrance(0)
                     LandingArt(landed: false, height: compact ? 150 : 200, showsPower: false)
                         .padding(.horizontal, -Theme.gutter)
                         .padding(.top, compact ? 0 : 12)
+                        .entrance(1)
                     DotTitle(text: "Invite code", size: compact ? 44 : 50, dot: .filled)
                         .padding(.top, compact ? 10 : 20)
+                        .entrance(2)
                     if appState.signedOut {
                         Label(SignedOut.notice, systemImage: "rectangle.portrait.and.arrow.right")
                             .font(Theme.Font.text(14, .semibold))
@@ -38,12 +42,7 @@ struct InviteActivationView: View {
                         }
                         .padding(.top, compact ? 16 : 26)
                         .accessibilityLabel("Invite code")
-                    if let err = appState.lastActivationError {
-                        Text(err)
-                            .font(Theme.Font.text(13, .medium))
-                            .foregroundStyle(Theme.Color.red)
-                            .padding(.top, 10)
-                    }
+                        .entrance(3)
                     Button {
                         redeem()
                     } label: {
@@ -56,11 +55,13 @@ struct InviteActivationView: View {
                     .buttonStyle(PrimaryButtonStyle(enabled: !isBusy))
                     .disabled(isBusy)
                     .padding(.top, 22)
+                    .entrance(4)
                     if FeatureFlags.appleSignInEnabled {
                         appleRecoverSection.padding(.top, 18)
                     }
                     footer
                         .padding(.top, 28)
+                        .entrance(5)
                 }
                 .padding(.horizontal, Theme.gutter)
                 .padding(.bottom, 20)
@@ -68,6 +69,11 @@ struct InviteActivationView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .rfPage()
+        .actionBanner($feedback)
+        .onChange(of: appState.lastActivationError) { _, error in
+            // Activation and Apple recovery both report here; the banner shows it above the keyboard.
+            if let error { feedback = .failure(error) }
+        }
         .onAppear {
             #if DEBUG
             if ScreenshotMode.isOn { return }   // screenshots: no keyboard over the page
@@ -94,13 +100,20 @@ struct InviteActivationView: View {
 
     private var footer: some View {
         HStack(spacing: 22) {
-            Link("Privacy", destination: URL(string: "https://www.redfluent.com/privacy")!)
-            Link("Terms", destination: URL(string: "https://www.redfluent.com/terms")!)
-            Link("Support", destination: URL(string: "https://www.redfluent.com/support")!)
+            footerLink("Privacy", "https://www.redfluent.com/privacy")
+            footerLink("Terms", "https://www.redfluent.com/terms")
+            footerLink("Support", "https://www.redfluent.com/support")
         }
         .font(Theme.Font.text(13, .medium))
         .foregroundStyle(Theme.Color.stone)
         .tint(Theme.Color.stone)
+    }
+
+    private func footerLink(_ title: String, _ url: String) -> some View {
+        Link(destination: URL(string: url)!) {
+            Text(title).touchTarget(height: 16)
+        }
+        .buttonStyle(PressStyle())
     }
 
     private var isBusy: Bool {
@@ -108,8 +121,23 @@ struct InviteActivationView: View {
     }
 
     private func redeem() {
-        let code = inviteCode
-        Task { await appState.redeem(inviteCode: code) }
+        guard !isBusy else { return }
+        Task {
+            // Read the field only after editing ended: text still being composed is in it now.
+            await EditCommit.endEditing()
+            #if DEBUG
+            if ScreenshotMode.isOn {
+                // Demo runs never activate against the real server: answer as it does for an unknown code.
+                appState.lastActivationError = nil
+                await DemoAPI.accept()
+                appState.lastActivationError = APIError.status(403, #"{"ok":false,"error":"invalid invite"}"#).localizedDescription
+                return
+            }
+            #endif
+            await appState.redeem(inviteCode: inviteCode)
+            // Success replaces this page with the home screen; say so in the hand too.
+            if appState.currentProfile != nil { Haptics.success() }
+        }
     }
 }
 

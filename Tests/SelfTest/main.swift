@@ -1009,12 +1009,52 @@ check(RecentlyDeleted.deleteMessage.contains("Recently Deleted"), "the Delete co
 
 section("31. home: IPv4-only Wi-Fi hint, appearance, numbers")
 
-check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "tokyo"), "Wi-Fi + no IPv6 + Tokyo -> hint")
-check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "Tokyo"), "region compared case-insensitively")
-check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: true, regionID: "tokyo"), "Wi-Fi with IPv6 -> no hint")
-check(!IPv6Hint.shows(onWiFi: false, wifiHasIPv6: false, regionID: "tokyo"), "cellular -> no hint")
-check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "singapore"), "Singapore -> no hint")
-check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: nil), "unknown region -> no hint")
+// The server did not say (older backend: runtimeMeta.ipv4Blocked absent): the old rule, Tokyo only.
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "tokyo", ipv4Blocked: nil), "absent: Wi-Fi + no IPv6 + Tokyo -> hint")
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "Tokyo", ipv4Blocked: nil), "absent: region compared case-insensitively")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: true, regionID: "tokyo", ipv4Blocked: nil), "absent: Wi-Fi with IPv6 -> no hint")
+check(!IPv6Hint.shows(onWiFi: false, wifiHasIPv6: false, regionID: "tokyo", ipv4Blocked: nil), "absent: cellular -> no hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "singapore", ipv4Blocked: nil), "absent: Singapore -> no hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: nil, ipv4Blocked: nil), "absent: unknown region -> no hint")
+// The server says ipv4Blocked true / false.
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "tokyo", ipv4Blocked: true), "true: Wi-Fi + no IPv6 + Tokyo -> hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "tokyo", ipv4Blocked: false),
+      "false (dual-stack Tokyo after the rebuild): Wi-Fi without IPv6 -> no hint")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: true, regionID: "tokyo", ipv4Blocked: true)
+      && !IPv6Hint.shows(onWiFi: false, wifiHasIPv6: false, regionID: "tokyo", ipv4Blocked: true),
+      "true: Wi-Fi with IPv6, or cellular -> no hint")
+check(IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: "singapore", ipv4Blocked: true),
+      "true for another region: that region gets the hint too")
+check(!IPv6Hint.shows(onWiFi: true, wifiHasIPv6: false, regionID: nil, ipv4Blocked: true), "true: unknown region -> no hint")
+// runtimeMeta.ipv4Blocked from the /device/runtime-config answer
+func meta(_ json: String) -> [String: Any] {
+    (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+}
+check(RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"ok":true,"runtimeConfig":{},"runtimeMeta":{"ipv4Blocked":true}}"#)) == true,
+      "runtimeMeta.ipv4Blocked true -> true")
+check(RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"ok":true,"runtimeConfig":{},"runtimeMeta":{"ipv4Blocked":false}}"#)) == false,
+      "runtimeMeta.ipv4Blocked false -> false")
+check(RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"ok":true,"runtimeConfig":{}}"#)) == nil
+      && RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"ok":true,"runtimeConfig":{},"runtimeMeta":{}}"#)) == nil,
+      "no runtimeMeta / no ipv4Blocked (older backend) -> nil")
+check(RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"runtimeMeta":{"ipv4Blocked":1}}"#)) == nil
+      && RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"runtimeMeta":{"ipv4Blocked":"true"}}"#)) == nil
+      && RuntimeConfigRequest.ipv4Blocked(in: meta(#"{"runtimeMeta":{"ipv4Blocked":null}}"#)) == nil,
+      "anything but a JSON true / false -> nil")
+// kept per region in the App Group by the tunnel, read by the app
+check(SharedContainer.ipv4BlockedKey == RegionStore.ipv4BlockedKey, "ipv4Blocked: tunnel and app use the same App Group key")
+let blockedMap = SharedContainer.updatedIPv4Blocked(SharedContainer.updatedIPv4Blocked([:], region: "Tokyo", blocked: true),
+                                                     region: "singapore", blocked: false)
+check(blockedMap == ["tokyo": true, "singapore": false], "ipv4Blocked: one entry per region (lowercased)")
+check(SharedContainer.updatedIPv4Blocked(blockedMap, region: "tokyo", blocked: false) == ["tokyo": false, "singapore": false]
+      && SharedContainer.updatedIPv4Blocked(blockedMap, region: "tokyo", blocked: nil) == ["singapore": false],
+      "ipv4Blocked: a newer answer replaces it; an answer that does not say removes it (old rule again)")
+suite.set(blockedMap, forKey: RegionStore.ipv4BlockedKey)
+check(RegionStore.ipv4Blocked(regionID: "Tokyo", suite) == true && RegionStore.ipv4Blocked(regionID: "singapore", suite) == false
+      && RegionStore.ipv4Blocked(regionID: "osaka", suite) == nil && RegionStore.ipv4Blocked(regionID: nil, suite) == nil,
+      "ipv4Blocked: the app reads the region's entry; none -> nil")
+suite.removeObject(forKey: RegionStore.ipv4BlockedKey)
+check(RegionStore.ipv4Blocked(regionID: "tokyo", suite) == nil, "ipv4Blocked: nothing stored yet -> nil (old rule)")
 check(IPv6Hint.text == "Wi-Fi has no IPv6 \u{2014} switch to cellular", "hint text")
 check(Appearance.from(nil) == .light && Appearance.from("") == .light && Appearance.from("system") == .light,
       "default light; never 'follow the system'")
@@ -1301,6 +1341,233 @@ check(appears("stopRequested = true", before: "stopFollowing()", in: functionBod
 // 6. timeout
 check(RuntimeConfigRequest.timeout == 15 && functionBody("fetchPerDeviceConfigData", in: providerSource).contains("timeoutInterval = RuntimeConfigRequest.timeout"),
       "runtime-config: one request, 15 s timeout")
+
+// MARK: 35. Action feedback (build 44 on the phone: "Create did nothing")
+
+section("35. action feedback: every server action answers in the top banner; fields are committed before they are read")
+
+let createSource = source("App/CreateInviteView.swift")
+let personSource = source("App/OwnerPersonView.swift")
+let adminSource = source("App/OwnerAdminView.swift")
+let activationSource = source("App/InviteActivationView.swift")
+let dashboardSource = source("App/MainDashboardView.swift")
+let diagnosticsSource = source("App/DiagnosticsView.swift")
+let feedbackSource = source("App/Components/ActionFeedback.swift")
+check(![createSource, personSource, adminSource, activationSource, dashboardSource, diagnosticsSource, feedbackSource].contains(""),
+      "sources for the feedback checks are readable")
+
+// the one component
+check(feedbackSource.contains(".overlay(alignment: .top)") && feedbackSource.contains("Haptics.success()")
+      && feedbackSource.contains("Haptics.failure()") && feedbackSource.contains("AccessibilityNotification.Announcement"),
+      "banner: pinned to the top of the page, success / error haptic, VoiceOver announcement")
+check(feedbackSource.contains("#selector(UIResponder.resignFirstResponder)"),
+      "EditCommit ends editing, which commits text the keyboard is still composing")
+check(APIError.status(409, #"{"ok":false,"error":"invite code already exists"}"#).localizedDescription == "This code is already in use.",
+      "409 'invite code already exists' reads as one plain sentence")
+
+// Create invite
+let createBody = functionBody("createInvite()", in: createSource)
+check(appears("EditCommit.endEditing()", before: "code.trimmingCharacters", in: createBody)
+      && appears("EditCommit.endEditing()", before: "label.trimmingCharacters", in: createBody)
+      && appears("EditCommit.endEditing()", before: "QuotaInput.parse(quotaText)", in: createBody),
+      "create: the fields are read only after editing ended (what is on screen is what is sent)")
+check(createBody.contains("guard !isCreating, createdInvite == nil else { return }"),
+      "create: one POST per invite (busy or already created -> nothing is sent)")
+check(createSource.contains(".actionBanner($feedback)") && createBody.contains("feedback = .success(")
+      && createBody.contains("feedback = .failure("), "create: success and failure answer in the banner")
+/// The source with every run of whitespace turned into one space (layout checks that ignore indentation).
+func squashed(_ text: String) -> String {
+    text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+}
+check(squashed(createSource).contains("ScrollView { VStack(alignment: .leading, spacing: 0) { if let createdInvite { created(createdInvite) } else { form } }"),
+      "create: the created invite takes the place of the form, first thing in the scroll view")
+check(!createSource.contains("errorMessage") && !createSource.contains("Text(error"),
+      "create: no result or error text left at the end of the scroll view")
+check(appears("BarRow(", before: "ScrollView {", in: createSource) && createSource.contains("if createdInvite == nil {"),
+      "create: bar pinned above the scroll view; Create is gone once the invite exists")
+
+// Person page and Recently Deleted
+let saveBody = functionBody("save()", in: personSource)
+check(appears("EditCommit.endEditing()", before: "pendingEdit", in: saveBody), "person save: the fields are read only after editing ended")
+check(saveBody.contains("model.feedback = .success(") && saveBody.contains("model.feedback = .failure("),
+      "person save: success and failure answer in the banner")
+for action in ["delete()", "logOutAll()", "logOut(", "rename(", "restore("] {
+    check(functionBody(action, in: personSource).contains("model.feedback ="), "person / Recently Deleted: \(action) answers in the banner")
+}
+check(appears("EditCommit.endEditing()", before: "renameText.trimmingCharacters", in: functionBody("rename(", in: personSource)),
+      "rename: the name is read only after editing ended")
+check(adminSource.contains(".actionBanner($model.feedback"), "Owner Admin: one banner over the whole navigation stack")
+check(!personSource.contains("@State private var message") && !personSource.contains("@State private var errors")
+      && !personSource.contains("@State private var restored"), "person / Recently Deleted: no inline result text left mid-page")
+
+// Activation, home
+check(appears("EditCommit.endEditing()", before: "appState.redeem(inviteCode: inviteCode)", in: functionBody("redeem()", in: activationSource))
+      && activationSource.contains(".actionBanner($feedback)") && !activationSource.contains("if let err = appState.lastActivationError"),
+      "activation: field committed before it is read; errors answer in the banner")
+check(dashboardSource.contains(".actionBanner($feedback)") && !dashboardSource.contains("appleLinkError"),
+      "home: the Apple ID link answers in the banner, not at the bottom of the page")
+
+// pinned bars
+for (file, text) in [("CreateInviteView", createSource), ("PersonView", personSource), ("OwnerAdminView", adminSource),
+                     ("DiagnosticsView", diagnosticsSource)] {
+    check(appears("BarRow", before: "ScrollView", in: text), "\(file): BarRow is pinned above the scroll view")
+}
+
+// MARK: 36. Motion and touch feel (round 3)
+
+section("36. motion: press, haptics, power button, numbers, segmented, entrances, edge swipe, Reduce Motion, 44 pt")
+
+let motionSource = source("App/Components/Motion.swift")
+let landingSource = source("App/Components/SoftLanding.swift")
+check(!motionSource.isEmpty && !landingSource.isEmpty, "sources for the motion checks are readable")
+let appFiles = (FileManager.default.enumerator(atPath: repoRoot + "/App")?.allObjects as? [String] ?? [])
+    .filter { $0.hasSuffix(".swift") }
+let appSources = appFiles.map { (file: $0, text: source("App/" + $0)) }
+check(appSources.count > 20, "all app sources found (\(appSources.count))")
+
+// edge swipe back (MAX's standing rule)
+let stack = adminSource.range(of: "NavigationStack(path:").map { String(adminSource[$0.lowerBound...]) } ?? ""
+check(appears(".edgeSwipeBack()", before: ".navigationDestination(", in: stack),
+      "edge swipe: on the root of the Owner Admin navigation stack, so it covers every page pushed onto it")
+check(appSources.filter { $0.text.contains("NavigationStack(") }.allSatisfy { $0.text.contains(".edgeSwipeBack()") },
+      "edge swipe: every NavigationStack in the app has it")
+let motionSquashed = squashed(motionSource)
+check(motionSquashed.contains("var list = [nav.interactivePopGestureRecognizer].compactMap { $0 }")
+      && motionSquashed.contains("if #available(iOS 26.0, *), let content = nav.interactiveContentPopGestureRecognizer { list.append(content) }")
+      && motionSquashed.contains("for recognizer in recognizers where recognizer.delegate !== self { recognizer.isEnabled = true recognizer.delegate = self }"),
+      "edge swipe: delegate of the edge swipe and (iOS 26, where it is the one that runs) of the swipe from the content")
+let shouldBegin = functionBody("gestureRecognizerShouldBegin", in: motionSource)
+check(shouldBegin.contains("(navigationController?.viewControllers.count ?? 0) > 1") && shouldBegin.contains("v.x > 0"),
+      "edge swipe: begins only with a page to go back to; from the content only for a move to the right")
+check(!appSources.contains { $0.text.contains("navigationBarBackButtonHidden") || $0.text.contains("interactivePopGestureRecognizer?.isEnabled = false") },
+      "edge swipe: nothing turns the back swipe off")
+
+// press feedback
+check(motionSource.contains("static let press = Animation.spring(response: 0.3, dampingFraction: 0.8)")
+      && motionSource.contains("static let pressScale: CGFloat = 0.96") && motionSource.contains("static let powerScale: CGFloat = 0.94"),
+      "press: 0.96 (power button 0.94) on a 0.3 / 0.8 spring, which turns round mid-press")
+let plainStyled = appSources.filter { $0.text.contains(".buttonStyle(.plain)") || $0.text.contains("PlainButtonStyle") || $0.text.contains(".buttonStyle(.borderless)") }
+check(plainStyled.isEmpty, "press: no control left on the plain style (no feedback / grey flash): \(plainStyled.map(\.file))")
+check(motionSource.contains(".easeOut(duration: 0.08) : .easeOut(duration: 0.2)"), "rows: highlight in 80 ms, out in 200 ms")
+
+// haptics
+for (name, body) in [("tap()", "light.impactOccurred()"), ("success()", "notice.notificationOccurred(.success)"),
+                     ("failure()", "notice.notificationOccurred(.error)"), ("off()", "soft.impactOccurred()"),
+                     ("select()", "selection.selectionChanged()")] {
+    check(motionSource.contains("static func \(name) { \(body)"), "haptics: \(name) -> \(body)")
+}
+let dashboardSquashed = squashed(dashboardSource)
+check(dashboardSource.contains("Haptics.tap()") && dashboardSquashed.contains("case (.connecting, .connected): return .success")
+      && dashboardSquashed.contains("case (.connecting, .failed), (.disconnecting, .failed): return .failure")
+      && dashboardSquashed.contains("case (.connected, .disconnected), (.disconnecting, .disconnected): return .off"),
+      "haptics: power press light; connected success; failed error; disconnected soft")
+check(dashboardSource.contains(".onAppear { Haptics.prepare() }") && motionSource.contains("if down { Haptics.prepare() }"),
+      "haptics: generators prepared on appear and on touch-down")
+check(landingSource.components(separatedBy: "Haptics.select()").count - 1 >= 3 && adminSource.contains("Haptics.select()")
+      && dashboardSquashed.contains("Haptics.select() ThemeFade.apply")
+      && dashboardSource.contains("if id != appState.selectedRegionID { Haptics.select() }"),
+      "haptics: a selection tick on segmented, chips, access presets, tabs, theme and region")
+
+// power button
+check(landingSource.contains("PhaseAnimator([false, true])") && landingSource.contains(".easeInOut(duration: 0.6)"),
+      "power: connecting breathes, 1.2 s a breath, ease in-out")
+check(landingSource.contains(".drawingGroup()") && landingSource.contains("glowing ? .easeOut(duration: 0.4) : .easeIn(duration: 0.25)"),
+      "power: the glow is pre-rendered (drawingGroup), blooms in 400 ms, goes in 250 ms")
+check(motionSource.contains("SwapEffect(rise: 4, blur: 4, opacity: 0)") && dashboardSource.contains(".transition(reduceMotion ? .opacity : .titleSwap)"),
+      "power: the status title cross-fades rising 4 pt out of a slight blur")
+
+// numbers
+check(motionSource.contains(".monospacedDigit()") && motionSource.contains(".numericText()"),
+      "numbers: tabular digits and the rolling transition")
+for (file, text, least) in [("MainDashboardView", dashboardSource, 4), ("OwnerPersonView", personSource, 1),
+                            ("OwnerAdminView", adminSource, 2), ("SoftLanding", landingSource, 2)] {
+    check(text.components(separatedBy: ".rollingNumber(").count - 1 >= least, "numbers: \(file) rolls its figures (>= \(least))")
+}
+for file in ["FrauncesRF-Display.ttf", "FrauncesRF-Text.ttf"] {
+    let url = URL(fileURLWithPath: repoRoot + "/App/Fonts/" + file)
+    let font = ((CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor])?.first)
+        .map { CTFontCreateWithFontDescriptor($0, 40, nil) }
+    var widths: Set<Double> = []
+    if let font {
+        var chars = Array("0123456789".utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: chars.count)
+        var advances = [CGSize](repeating: .zero, count: chars.count)
+        if CTFontGetGlyphsForCharacters(font, &chars, &glyphs, chars.count) {
+            CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advances, chars.count)
+            widths = Set(advances.map { Double($0.width) })
+        }
+    }
+    check(widths.count == 1, "numbers: \(file) digits all one width (\(widths.sorted()))")
+}
+let archivoURL = URL(fileURLWithPath: repoRoot + "/App/Fonts/ArchivoRF-Medium.ttf")
+let archivoGSUB = ((CTFontManagerCreateFontDescriptorsFromURL(archivoURL as CFURL) as? [CTFontDescriptor])?.first)
+    .flatMap { CTFontCopyTable(CTFontCreateWithFontDescriptor($0, 12, nil), CTFontTableTag(kCTFontTableGSUB), []) as Data? }
+check(archivoGSUB?.range(of: Data("tnum".utf8)) != nil, "numbers: Archivo has tabular figures (tnum) for monospacedDigit")
+
+// segmented, chips, notices
+check(landingSource.contains(".matchedGeometryEffect(id: \"pill\", in: pill)") && adminSource.contains(".matchedGeometryEffect(id: \"underline\", in: tabUnderline)"),
+      "segmented: the selected pill (and the tab underline) slides")
+check(landingSource.contains(".animation(Motion.fill, value: on)") && motionSource.contains("static let fill = Animation.easeOut(duration: 0.15)"),
+      "chips: the fill animates in 150 ms")
+check(landingSource.contains("guard focused.wrappedValue, let problem, problem != .empty else { return nil }")
+      && landingSource.contains("private var chipsProblem: String? { focused.wrappedValue ? nil : problem?.message }")
+      && landingSource.contains("if let rowProblem {") && landingSource.contains("if let chipsProblem {")
+      && landingSource.contains("insertion: reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4))"),
+      "quota: while typing, what is wrong shows in the field's own row (the keyboard covers the quick values); fades in rising 4 pt")
+
+// entrances, banners, theme
+check(motionSource.contains("Double(min(max(order, 0), 5)) * 0.04") && motionSource.contains(".offset(y: shown || reduceMotion ? 0 : 8)"),
+      "entrances: rise 8 pt, 40 ms apart, at most 6 steps")
+check(motionSource.contains("static let bannerOut = Animation.easeIn(duration: 0.15)") && feedbackSource.contains("Motion.bannerOut"),
+      "banners: slide in, leave in 150 ms")
+check(motionSource.contains("UIView.animate(withDuration: 0.25") && dashboardSource.contains("ThemeFade.apply"),
+      "theme: the whole UI cross-fades in 250 ms")
+
+// Reduce Motion
+check(motionSource.contains(".scaleEffect(pressed && !reduceMotion ? scale : 1)") && motionSource.contains("let delay = reduceMotion ? 0")
+      && motionSource.contains(".contentTransition(reduceMotion ? .opacity : .numericText())")
+      && landingSource.contains("if reduceMotion {") && motionSource.contains("systemReduceMotion || Motion.forcedReduce"),
+      "Reduce Motion: no scale, no stagger, no rolling, no landing spring; plain fades")
+let hapticsBlock = motionSource.range(of: "enum Haptics {").flatMap { start in
+    motionSource.range(of: "// MARK: - Press feedback").map { String(motionSource[start.lowerBound..<$0.lowerBound]) }
+} ?? "reduceMotion"
+check(!hapticsBlock.localizedCaseInsensitiveContains("reduceMotion"),
+      "Reduce Motion: haptics stay")
+
+// 44 pt
+check(motionSource.contains("static let minTouch: CGFloat = 44") && motionSource.contains("max(0, (Motion.minTouch - height) / 2)"),
+      "touch: controls drawn small get a 44 x 44 pt target")
+for (file, text, least) in [("SoftLanding", landingSource, 7), ("OwnerAdminView", adminSource, 2), ("DiagnosticsView", diagnosticsSource, 1),
+                            ("InviteActivationView", activationSource, 1), ("MainDashboardView", dashboardSource, 1)] {
+    check(text.components(separatedBy: ".touchTarget(").count - 1 >= least, "touch: \(file) icon / small controls have touch targets (>= \(least))")
+}
+
+// MARK: 37. Dual-stack Tokyo: "proxy" becomes a urltest group over proxy-v4 / proxy-v6
+
+section("37. dual-stack entry: nothing reads the proxy outbound; runtimeMeta.ipv4Blocked is kept for the Wi-Fi hint")
+
+check(functionBody("fetchPerDeviceConfigData", in: providerSource)
+        .contains("SharedContainer.writeIPv4Blocked(RuntimeConfigRequest.ipv4Blocked(in: obj), region: echoed ?? region)"),
+      "tunnel: every runtime config answer updates the region's ipv4Blocked (absent -> entry removed)")
+let dualStack = Data(#"""
+{"outbounds":[{"type":"urltest","tag":"proxy","outbounds":["proxy-v4","proxy-v6"]},
+ {"type":"vless","tag":"proxy-v4","server":"192.0.2.1","server_port":443},
+ {"type":"vless","tag":"proxy-v6","server":"2001:db8::1","server_port":443},{"type":"direct","tag":"direct"}],
+ "route":{"final":"proxy"}}
+"""#.utf8)
+check(configObject(SharedContainer.decodeLastGood(SharedContainer.encodeLastGood(
+          config: dualStack, region: "tokyo", serverRegion: "Tokyo", fetchedAt: startNow))?.config) == configObject(dualStack)
+      && configObject(dualStack) != nil,
+      "a urltest config is kept as the last good one unchanged")
+let injectBody = functionBody("injectClashAPI(", in: providerSource)
+check(!injectBody.isEmpty && !injectBody.contains("outbounds") && injectBody.contains("root[\"experimental\"] = experimental"),
+      "clash API injection only touches experimental.clash_api, never the outbounds")
+let readsOutbounds = (appSources + [("Tunnel/PacketTunnelProvider.swift", providerSource),
+                                    ("Tunnel/ClashStatsPoller.swift", source("Tunnel/ClashStatsPoller.swift"))])
+    .filter { $0.text.contains("[\"outbounds\"]") || $0.text.contains("[\"server\"]") || $0.text.contains("\"server_port\"") }
+check(readsOutbounds.isEmpty, "no app or tunnel code reads outbounds / server / server_port from the config: \(readsOutbounds.map(\.0))")
+check(source("App/StatsStore.swift").contains("https://vpn-api.redfluent.com/health"),
+      "ping measures the API's /health over HTTPS, not the proxy server")
 
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))
