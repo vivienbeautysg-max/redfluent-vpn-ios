@@ -30,4 +30,17 @@ if [ -n "$leaked" ]; then
   exit 1
 fi
 
-echo "    ✅ 发版闸通过：IPA 内无源码/备份文件"
+# 全员共用的旧凭据配置：扩展早已不再读取（只用服务器发给本设备的配置），出现在 IPA 里就等于把凭据随包分发。
+shared_config="$(unzip -l "$IPA" | grep -E 'review-tunnel\.json' || true)"
+if [ -n "$shared_config" ]; then
+  echo "" >&2
+  echo "🔴 发版闸拦截：IPA 里带着 review-tunnel.json（共用 VPN 凭据），已中止。" >&2
+  echo "" >&2
+  printf '%s\n' "$shared_config" | sed 's/^/    /' >&2
+  echo "" >&2
+  echo "修法：确认 project.yml 的 RedFluentVPNTunnel 没有把 Tunnel/Resources 当资源打包，重新 xcodegen generate。" >&2
+  echo "" >&2
+  exit 1
+fi
+
+echo "    ✅ 发版闸通过：IPA 内无源码/备份文件，无共用凭据配置"

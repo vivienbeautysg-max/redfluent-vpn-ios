@@ -156,13 +156,24 @@ final class TunnelManager: ObservableObject {
         serverStop = nil
     }
 
-    /// The server signed this device out: stop the tunnel, turn on-demand off and drop the saved device token, so
-    /// nothing reconnects (a start without the token could otherwise fall back to the bundled Tokyo config).
+    /// The server signed this device out: stop the tunnel and remove its VPN configuration, so neither on-demand
+    /// nor the switch in iOS Settings can start it again, and delete the device's last good config. The next
+    /// Connect after activating creates the configuration anew.
     func stopForSignOut() async {
         attempts.cancel()
-        // Never configured: nothing to stop, and saving a new configuration would raise the VPN permission prompt.
-        guard (try? await loadManager()) != nil else { return }
-        await disconnect()
+        LastGoodTunnelConfig.clear()
+        do {
+            // Never configured: nothing to stop or remove.
+            guard let manager = try await loadManager() else { return }
+            manager.connection.stopVPNTunnel()
+            try await manager.removeFromPreferences()
+            status = .disconnected
+        } catch {
+            // Could not remove it: at least turn on-demand off (touches only an existing configuration, so no
+            // permission prompt). A start from Settings then asks the server with the signed-out token and is refused.
+            lastError = "Could not remove the VPN configuration: \(error.localizedDescription)"
+            await turnOffOnDemand()
+        }
     }
 
     /// The tunnel went down without the app asking. If the extension left a reason (the server ended access,
@@ -276,8 +287,8 @@ final class TunnelManager: ObservableObject {
             "regionMode": RegionStore.isServerDecided() ? "server" : "explicit",
         ]
         // Pass the device token + API base so the tunnel extension can fetch a
-        // per-device sing-box config (its own uuid) from the backend. The
-        // extension falls back to the bundled config if this is absent or fails.
+        // per-device sing-box config (its own uuid) from the backend. Without
+        // them the extension refuses to start (there is no shared fallback config).
         if let profile = ProfileStore.load() {
             providerConfig["token"] = profile.token
             providerConfig["apiBase"] = "https://vpn-api.redfluent.com"

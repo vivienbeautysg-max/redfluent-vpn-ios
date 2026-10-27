@@ -206,6 +206,20 @@ enum ServerStop: String, Equatable {
 /// Why the tunnel last failed to start, or was stopped by the server. The extension writes it just before it
 /// throws / cancels and the app reads it: a file in the App Group container, so it does not depend on the
 /// order of NetworkExtension status changes or on a preferences cache.
+/// The last runtime config the server issued to this device, kept by the tunnel extension in the App Group.
+enum LastGoodTunnelConfig {
+    /// Must stay identical to SharedContainer.lastGoodFileName in the tunnel target.
+    static let fileName = "last-good-config.json"
+
+    /// Signed out: the device's saved credentials go too.
+    static func clear() {
+        guard let url = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: RegionStore.appGroupID)?
+            .appendingPathComponent(fileName) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
 enum TunnelStartError {
     /// Must stay identical to SharedContainer.startErrorFileName in the tunnel target.
     static let fileName = "start-error.json"

@@ -124,7 +124,7 @@ check(RuntimeConfigRequest.serverReason(from: Data("<html>".utf8)) == nil, "non-
 check(RuntimeConfigRequest.failureMessage(region: "singapore", detail: "HTTP 403: region not allowed")
       == "Singapore server unavailable: HTTP 403: region not allowed", "failure message text")
 check(RuntimeConfigRequest.isDefault(region: "tokyo") && !RuntimeConfigRequest.isDefault(region: "singapore"),
-      "only tokyo may fall back to the bundled config")
+      "only tokyo may fall back (to its last good config, section 33)")
 
 // MARK: 4. usage
 
@@ -480,8 +480,9 @@ check(FollowPolicy.decide(active: "singapore", outcome: .http(status: 200, error
 check(FollowPolicy.decide(active: "tokyo", outcome: .network) == .keep, "network error -> keep running, retry next tick")
 check(FollowPolicy.stopKind(status: 401, error: "token expired") == .revoked, "an expired login token (401) is not 'invite expired'")
 check(FollowPolicy.blocksStart(.http(status: 403, error: "invite expired")), "start: an expired invite never connects")
-check(!FollowPolicy.blocksStart(.http(status: 401, error: "unauthorized")), "start: 401 keeps today's behaviour")
-check(!FollowPolicy.blocksStart(.http(status: 403, error: "device revoked")), "start: revoked keeps today's behaviour")
+check(!FollowPolicy.blocksStart(.http(status: 401, error: "unauthorized")), "blocksStart is only expiry: 401 is StartPolicy's (section 33)")
+check(!FollowPolicy.blocksStart(.http(status: 403, error: "device revoked")), "blocksStart is only expiry: revoked is StartPolicy's (section 33)")
+check(FollowPolicy.decide(active: "tokyo", outcome: .notActivated) == .keep, "no token while running (cannot happen) -> keep")
 check(!FollowPolicy.blocksStart(.network) && !FollowPolicy.blocksStart(.config(region: "tokyo")), "start: network / success are not blocked")
 check(FollowPolicy.interval == 300, "one check every 5 minutes")
 check(FollowPolicy.minGap >= 30 && FollowPolicy.pathDebounce >= 10, "checks are rate limited (battery)")
@@ -1054,6 +1055,122 @@ for entry in AppFonts.all {
 check(["OFL-Fraunces.txt", "OFL-Archivo.txt", "OFL-IBMPlexMono.txt"].allSatisfy {
     (try? String(contentsOfFile: repoRoot + "/App/Fonts/" + $0, encoding: .utf8))?.contains("SIL Open Font License") == true
 }, "the three OFL licence texts ship next to the fonts")
+
+// MARK: 33. Tunnel start: own config only, last good config
+
+section("33. tunnel start: only this device's config; 401/403/404 refuse + clear; unreachable -> last good (<= 30 days)")
+
+let startNow = Date(timeIntervalSince1970: 4_000_000)
+let day: TimeInterval = 86_400
+let freshTokyo: (fetchedAt: Date, region: String)? = (fetchedAt: startNow.addingTimeInterval(-day), region: "tokyo")
+func startDecision(_ outcome: RuntimeConfigOutcome, region: String, lastGood: (fetchedAt: Date, region: String)?) -> StartDecision {
+    StartPolicy.decide(outcome: outcome, region: region, detail: "HTTP x", lastGood: lastGood, now: startNow)
+}
+func refused(_ code: Int, _ message: String, clears: Bool) -> StartDecision {
+    .refuse(code: code, message: message, clearsLastGood: clears)
+}
+
+// success
+check(startDecision(.config(region: "tokyo"), region: "tokyo", lastGood: nil) == .useFetched, "fetched config -> use it")
+check(startDecision(.config(region: nil), region: "tokyo", lastGood: freshTokyo) == .useFetched, "fetched (no region echo) -> use it, not the saved one")
+check(startDecision(.config(region: "singapore"), region: "singapore", lastGood: nil) == .useFetched, "fetched Singapore -> use it")
+// no token
+check(startDecision(.notActivated, region: "tokyo", lastGood: freshTokyo) == refused(401, "Device not activated", clears: true),
+      "no device token (signed out) -> refuse + clear, even with a fresh saved config")
+// account ended
+check(startDecision(.http(status: 403, error: "invite expired"), region: "tokyo", lastGood: freshTokyo) == refused(403, "Invite expired", clears: true),
+      "403 invite expired -> refuse (same code and text as before) + clear")
+check(startDecision(.http(status: 403, error: "invite expired"), region: "singapore", lastGood: nil) == refused(403, "Invite expired", clears: true),
+      "403 invite expired in Singapore -> expired, as before")
+check(startDecision(.http(status: 401, error: "unauthorized"), region: "tokyo", lastGood: freshTokyo) == refused(401, "Access revoked", clears: true),
+      "401 (signed out) -> refuse + clear")
+check(startDecision(.http(status: 401, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(401, "Access revoked", clears: true),
+      "401 without a JSON body -> refuse + clear (never connect on a 401)")
+check(startDecision(.http(status: 403, error: "device revoked"), region: "tokyo", lastGood: freshTokyo) == refused(403, "Access revoked", clears: true),
+      "403 revoked -> refuse + clear")
+check(startDecision(.http(status: 403, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(403, "Access revoked", clears: true),
+      "403 without a JSON body -> refuse + clear")
+check(startDecision(.http(status: 404, error: "device not found"), region: "tokyo", lastGood: freshTokyo) == refused(404, "Device not found", clears: true),
+      "404 (deleted / unknown device) -> refuse + clear")
+check(startDecision(.http(status: 401, error: "unauthorized"), region: "singapore", lastGood: freshTokyo)
+      == refused(210, "Singapore server unavailable: HTTP x", clears: true),
+      "401 in Singapore -> the region message as before, and clear")
+// region refusals stay as they were
+check(startDecision(.http(status: 403, error: "region not allowed"), region: "singapore", lastGood: freshTokyo)
+      == refused(210, "Singapore server unavailable: HTTP x", clears: false),
+      "403 region not allowed (Singapore) -> unchanged message, saved config kept")
+check(startDecision(.http(status: 403, error: "region not allowed"), region: "tokyo", lastGood: freshTokyo) == refused(403, "Server error 403", clears: false),
+      "403 region (Tokyo) -> refuse, not about the device, keep the saved config")
+check(startDecision(.http(status: 503, error: "region unavailable"), region: "singapore", lastGood: freshTokyo)
+      == refused(210, "Singapore server unavailable: HTTP x", clears: false),
+      "Singapore unreachable -> unchanged: never falls back")
+check(startDecision(.network, region: "singapore", lastGood: (fetchedAt: startNow, region: "singapore"))
+      == refused(210, "Singapore server unavailable: HTTP x", clears: false),
+      "Singapore offline with a Singapore saved config -> still refused (non-default region unchanged)")
+// unreachable -> last good
+check(startDecision(.network, region: "tokyo", lastGood: freshTokyo) == .useLastGood, "offline / timeout + saved config 1 day old -> use it")
+check(startDecision(.network, region: "Tokyo", lastGood: freshTokyo) == .useLastGood, "region compared case-insensitively")
+check([500, 502, 503, 504].allSatisfy { startDecision(.http(status: $0, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood },
+      "5xx + saved config -> use it")
+check(startDecision(.http(status: 408, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood
+      && startDecision(.http(status: 429, error: "slow down"), region: "tokyo", lastGood: freshTokyo) == .useLastGood, "408 / 429 + saved config -> use it")
+check(startDecision(.http(status: 200, error: nil), region: "tokyo", lastGood: freshTokyo) == .useLastGood,
+      "200 without a config (portal / proxy page) + saved config -> use it")
+check(startDecision(.network, region: "tokyo", lastGood: nil) == refused(230, "Can't reach server", clears: false),
+      "offline, nothing saved -> Can't reach server")
+check(startDecision(.http(status: 503, error: nil), region: "tokyo", lastGood: nil) == refused(230, "Can't reach server", clears: false),
+      "5xx, nothing saved -> Can't reach server")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow.addingTimeInterval(-30 * day), region: "tokyo")) == .useLastGood,
+      "saved exactly 30 days ago -> still used")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow.addingTimeInterval(-30 * day - 1), region: "tokyo"))
+      == refused(230, "Can't reach server", clears: false), "saved 30 days + 1 s ago -> too old")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow.addingTimeInterval(-90 * day), region: "tokyo"))
+      == refused(230, "Can't reach server", clears: false), "saved 90 days ago -> too old")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow.addingTimeInterval(3600), region: "tokyo")) == .useLastGood,
+      "saved 1 h 'in the future' (clock corrected) -> still used")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow.addingTimeInterval(2 * day), region: "tokyo"))
+      == refused(230, "Can't reach server", clears: false), "saved 2 days in the future -> not trusted")
+check(startDecision(.network, region: "tokyo", lastGood: (fetchedAt: startNow, region: "singapore"))
+      == refused(230, "Can't reach server", clears: false), "saved config is for another region -> not used")
+// other answers
+check(startDecision(.http(status: 400, error: "bad request"), region: "tokyo", lastGood: freshTokyo) == refused(400, "Server error 400", clears: false),
+      "400 -> refuse, keep the saved config")
+check(startDecision(.http(status: 409, error: nil), region: "tokyo", lastGood: freshTokyo) == refused(409, "Server error 409", clears: false),
+      "409 -> refuse, keep the saved config")
+check(StartPolicy.isUnreachable(.network) && StartPolicy.isUnreachable(.http(status: 500, error: nil))
+      && !StartPolicy.isUnreachable(.http(status: 404, error: nil)) && !StartPolicy.isUnreachable(.http(status: 401, error: nil))
+      && !StartPolicy.isUnreachable(.config(region: nil)) && !StartPolicy.isUnreachable(.notActivated), "what counts as unreachable")
+check(StartPolicy.lastGoodMaxAge == 30 * day, "last good config: at most 30 days")
+
+// the saved record
+let fakeConfig = Data(#"{"outbounds":[{"type":"vless","server":"192.0.2.1","server_port":443}],"log":{"level":"warn"}}"#.utf8)
+let lastGoodRecord = SharedContainer.encodeLastGood(config: fakeConfig, region: "tokyo", serverRegion: "Tokyo", fetchedAt: startNow)
+let lastGoodBack = SharedContainer.decodeLastGood(lastGoodRecord)
+check(lastGoodBack?.region == "tokyo" && lastGoodBack?.serverRegion == "Tokyo" && lastGoodBack?.fetchedAt == startNow,
+      "last good record keeps region, server name and fetch time")
+let configObject = { (data: Data?) -> NSDictionary? in data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? NSDictionary } }
+check(configObject(lastGoodBack?.config) == configObject(fakeConfig) && configObject(fakeConfig) != nil,
+      "last good record keeps the raw config unchanged (no clash API in it)")
+check(SharedContainer.decodeLastGood(SharedContainer.encodeLastGood(config: fakeConfig, region: "tokyo", serverRegion: nil, fetchedAt: startNow))?.serverRegion == nil,
+      "server name is optional")
+check(SharedContainer.encodeLastGood(config: Data("[1,2]".utf8), region: "tokyo", serverRegion: nil, fetchedAt: startNow) == nil
+      && SharedContainer.encodeLastGood(config: Data("junk".utf8), region: "tokyo", serverRegion: nil, fetchedAt: startNow) == nil,
+      "only a JSON object is kept")
+check(SharedContainer.decodeLastGood(nil) == nil && SharedContainer.decodeLastGood(Data("junk".utf8)) == nil
+      && SharedContainer.decodeLastGood(Data(#"{"fetchedAt":1,"runtimeConfig":{}}"#.utf8)) == nil
+      && SharedContainer.decodeLastGood(Data(#"{"fetchedAt":1,"region":"","runtimeConfig":{}}"#.utf8)) == nil
+      && SharedContainer.decodeLastGood(Data(#"{"region":"tokyo","runtimeConfig":{}}"#.utf8)) == nil
+      && SharedContainer.decodeLastGood(Data(#"{"fetchedAt":1,"region":"tokyo","runtimeConfig":[1]}"#.utf8)) == nil,
+      "a broken record is ignored (missing region / time, config not an object)")
+check(SharedContainer.lastGoodFileName == LastGoodTunnelConfig.fileName, "app and extension use the same last good file name")
+
+// the shared config is gone for good
+let tunnelSource = (try? String(contentsOfFile: repoRoot + "/Tunnel/PacketTunnelProvider.swift", encoding: .utf8)) ?? ""
+let projectSpec = (try? String(contentsOfFile: repoRoot + "/project.yml", encoding: .utf8)) ?? ""
+check(!tunnelSource.isEmpty && !tunnelSource.contains("review-tunnel") && !tunnelSource.contains("Bundle.main.url(forResource"),
+      "the extension never reads a bundled config")
+check(!projectSpec.isEmpty && !projectSpec.contains("path: Tunnel/Resources") && projectSpec.contains("- Resources"),
+      "project.yml does not ship Tunnel/Resources (and still excludes it from the Tunnel sources)")
 
 suite.removePersistentDomain(forName: suiteName)
 print("\n\(checks - failures)/\(checks) checks passed" + (failures == 0 ? "" : ", \(failures) FAILED"))

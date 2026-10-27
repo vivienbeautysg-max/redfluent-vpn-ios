@@ -8,6 +8,8 @@ enum RuntimeConfigOutcome: Equatable {
     case http(status: Int, error: String?)
     /// No usable answer (offline, timeout, not an HTTP response).
     case network
+    /// No device token / API base in the saved configuration: nothing to ask the server with.
+    case notActivated
 }
 
 /// Why the server ended this device's access.
@@ -57,8 +59,7 @@ enum FollowPolicy {
         return nil
     }
 
-    /// At tunnel start only an expired invite is refused outright; every other failure keeps
-    /// today's behaviour (Tokyo falls back to the bundled config).
+    /// An expired invite: refused at start with its own message (the rest of the start rules: StartPolicy).
     static func blocksStart(_ outcome: RuntimeConfigOutcome) -> Bool {
         stopKind(of: outcome) == .expired
     }
@@ -68,7 +69,7 @@ enum FollowPolicy {
     /// What to do with the answer of a follow check while `active` is the region the engine runs.
     static func decide(active: String, outcome: RuntimeConfigOutcome) -> FollowAction {
         switch outcome {
-        case .network:
+        case .network, .notActivated:
             return .keep
         case .http:
             if let kind = stopKind(of: outcome) { return .stop(kind) }
@@ -90,5 +91,92 @@ enum FollowPolicy {
     static func pathChangeWarrantsCheck(previous: PathSignature?, current: PathSignature) -> Bool {
         guard let previous else { return false }
         return current.satisfied && previous != current
+    }
+}
+
+/// What the tunnel does at start with the answer of `GET /device/runtime-config`.
+enum StartDecision: Equatable {
+    /// Connect with the config just fetched (and keep it as this device's last good one).
+    case useFetched
+    /// The server could not be reached: connect with the last config the server issued to this device.
+    case useLastGood
+    /// Do not connect. `clearsLastGood`: the server ended this device's access, so its saved config goes too.
+    case refuse(code: Int, message: String, clearsLastGood: Bool)
+}
+
+/// The start rules (pure, no I/O). A device connects only with a config the server issued to it: the one just
+/// fetched or, when the server cannot be reached, the last one it got (same region, at most 30 days old).
+/// There is no shared fallback config.
+enum StartPolicy {
+    static let lastGoodMaxAge: TimeInterval = 30 * 86_400
+    /// A saved config may look up to this much newer than now (clock corrections) and still count.
+    static let clockSlack: TimeInterval = 86_400
+    static let unreachableMessage = "Can't reach server"
+    static let notActivatedMessage = "Device not activated"
+    static let notFoundMessage = "Device not found"
+
+    static func lastGoodIsFresh(fetchedAt: Date, now: Date) -> Bool {
+        let age = now.timeIntervalSince(fetchedAt)
+        return age >= -clockSlack && age <= lastGoodMaxAge
+    }
+
+    /// No usable answer: offline, timeout, 5xx, 408 / 429, or a 2xx without a config (a portal or proxy page).
+    /// Says nothing about this device's access.
+    static func isUnreachable(_ outcome: RuntimeConfigOutcome) -> Bool {
+        switch outcome {
+        case .network:
+            return true
+        case .http(let status, _):
+            return status >= 500 || status == 408 || status == 429 || (200..<300).contains(status)
+        case .config, .notActivated:
+            return false
+        }
+    }
+
+    /// - Parameters:
+    ///   - region: the region the saved configuration asks for.
+    ///   - detail: the failure text for the region message ("HTTP 503", "timed out", ...).
+    ///   - lastGood: when and for which region the saved last good config was fetched, if there is one.
+    static func decide(outcome: RuntimeConfigOutcome, region: String, detail: String,
+                       lastGood: (fetchedAt: Date, region: String)?, now: Date) -> StartDecision {
+        switch outcome {
+        case .config:
+            return .useFetched
+        case .notActivated:
+            return .refuse(code: 401, message: notActivatedMessage, clearsLastGood: true)
+        case .http, .network:
+            break
+        }
+        let isDefault = RuntimeConfigRequest.isDefault(region: region)
+        if FollowPolicy.blocksStart(outcome) {
+            return .refuse(code: 403, message: StopKind.expired.message, clearsLastGood: true)
+        }
+        // Signed out, deleted, revoked, unknown device. A 403 "region ..." is about the region asked for, not the device.
+        if case .http(let status, let error) = outcome, [401, 403, 404].contains(status),
+           !(status == 403 && (error?.lowercased().contains("region") ?? false)) {
+            guard isDefault else {
+                return .refuse(code: 210, message: RuntimeConfigRequest.failureMessage(region: region, detail: detail),
+                               clearsLastGood: true)
+            }
+            return .refuse(code: status, message: status == 404 ? notFoundMessage : StopKind.revoked.message,
+                           clearsLastGood: true)
+        }
+        // Unchanged: a non-default region that cannot be loaded never connects to something else.
+        guard isDefault else {
+            return .refuse(code: 210, message: RuntimeConfigRequest.failureMessage(region: region, detail: detail),
+                           clearsLastGood: false)
+        }
+        if isUnreachable(outcome) {
+            if let lastGood, FollowPolicy.sameRegion(lastGood.region, region),
+               lastGoodIsFresh(fetchedAt: lastGood.fetchedAt, now: now) {
+                return .useLastGood
+            }
+            return .refuse(code: 230, message: unreachableMessage, clearsLastGood: false)
+        }
+        // Any other answer (400, 409, 403 "region ..."): the server refused this request; keep what is saved.
+        guard case .http(let status, _) = outcome else {
+            return .refuse(code: 230, message: unreachableMessage, clearsLastGood: false)
+        }
+        return .refuse(code: status, message: "Server error \(status)", clearsLastGood: false)
     }
 }

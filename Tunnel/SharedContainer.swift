@@ -9,6 +9,8 @@ enum SharedContainer {
     static let activeRegionKey = "rfv.region.active"
     /// Must stay identical to TunnelStartError.fileName in the app target.
     static let startErrorFileName = "start-error.json"
+    /// Must stay identical to LastGoodTunnelConfig.fileName in the app target.
+    static let lastGoodFileName = "last-good-config.json"
 
     static var containerURL: URL? {
         FileManager.default
@@ -110,5 +112,68 @@ enum SharedContainer {
     private static func write(_ data: Data?) {
         guard let url = startErrorURL, let data else { return }
         try? data.write(to: url, options: [.atomic])
+    }
+
+    // MARK: Last good config
+
+    /// The last runtime config the server issued to this device (before the clash API is injected).
+    struct LastGood: Equatable {
+        let config: Data
+        /// The region it was fetched for.
+        let region: String
+        let serverRegion: String?
+        let fetchedAt: Date
+    }
+
+    static var lastGoodURL: URL? {
+        containerURL?.appendingPathComponent(lastGoodFileName)
+    }
+
+    /// {"fetchedAt": epoch seconds, "region": id, "serverRegion": name, "runtimeConfig": {...}}. Nil unless
+    /// `config` is a JSON object.
+    static func encodeLastGood(config: Data, region: String, serverRegion: String?, fetchedAt: Date) -> Data? {
+        guard let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any] else { return nil }
+        var record: [String: Any] = [
+            "fetchedAt": fetchedAt.timeIntervalSince1970,
+            "region": region,
+            "runtimeConfig": object,
+        ]
+        if let serverRegion { record["serverRegion"] = serverRegion }
+        return try? JSONSerialization.data(withJSONObject: record)
+    }
+
+    static func decodeLastGood(_ data: Data?) -> LastGood? {
+        guard let data,
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let at = record["fetchedAt"] as? Double, at.isFinite,
+              let region = record["region"] as? String, !region.isEmpty,
+              let object = record["runtimeConfig"] as? [String: Any],
+              let config = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        return LastGood(config: config, region: region, serverRegion: record["serverRegion"] as? String,
+                        fetchedAt: Date(timeIntervalSince1970: at))
+    }
+
+    /// Keep `config` as this device's last good one. Atomic; readable from the first unlock after boot, so an
+    /// on-demand start while the phone is locked can still use it. False when it could not be written.
+    @discardableResult
+    static func writeLastGood(config: Data, region: String, serverRegion: String?, at: Date = Date()) -> Bool {
+        guard let url = lastGoodURL,
+              let data = encodeLastGood(config: config, region: region, serverRegion: serverRegion, fetchedAt: at)
+        else { return false }
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func readLastGood() -> LastGood? {
+        decodeLastGood(lastGoodURL.flatMap { try? Data(contentsOf: $0) })
+    }
+
+    static func clearLastGood() {
+        guard let url = lastGoodURL else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 }

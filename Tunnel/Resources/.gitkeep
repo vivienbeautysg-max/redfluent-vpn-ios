@@ -1,13 +1,10 @@
-Resources directory placeholder. The actual review-tunnel.json (containing
-production VLESS + Reality credentials) is gitignored and must be copied
-in manually on the build machine before archiving.
+Not bundled. This directory is excluded from the RedFluentVPNTunnel target (project.yml)
+and nothing in it ships in the app.
 
-KNOWN-GOOD CONFIG: redfluent-singbox-ios-split-v3.json
-(verified working — VLESS + Reality + xtls-rprx-vision + utls chrome,
-DNS via Cloudflare DoH, SG bank/gov direct, China/sensitive sites via proxy)
+The extension used to fall back to a shared config here (review-tunnel.json, production
+VLESS + Reality credentials) whenever the per-device fetch failed. That fallback is gone:
+the tunnel now connects only with the config the server issues to the device, or, when the
+server cannot be reached, the last one it got (App Group, at most 30 days old).
+See StartPolicy in Tunnel/RegionFollow.swift.
 
-On the cloud Mac:
-  cp /path/to/redfluent-vpn/secrets/redfluent-singbox-ios-split-v3.json \
-     ~/Projects/redfluent-vpn-ios/Tunnel/Resources/review-tunnel.json
-
-PacketTunnelProvider loads this JSON via Bundle.main.url(forResource:withExtension:).
+scripts/verify-ipa-clean.sh fails any IPA that contains review-tunnel.json.

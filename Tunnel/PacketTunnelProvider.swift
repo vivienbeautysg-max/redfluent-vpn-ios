@@ -88,7 +88,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     #if HAS_LIBBOX
     private func startWithLibbox() async throws {
-        // 1. Resolve config — per-device from backend, else bundled fallback.
+        // 1. Resolve config — per-device from backend, else this device's last good one (see loadConfig).
         let configContent = try await loadConfig()
 
         // 2. Compute paths in extension's own sandbox container (no App Group needed)
@@ -162,37 +162,45 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func loadConfig() async throws -> String {
-        // Prefer a per-device config from the backend (carries this device's own
-        // uuid, so revoking it server-side actually cuts the tunnel). Fall back
-        // to the bundled shared config on ANY failure so the tunnel still comes up.
-        // Exceptions: an expired invite never connects, and a non-default region never falls back
-        // (the bundled config is Tokyo; connecting there while the app says Singapore would be a lie).
+        // Only a config the server issued to this device (its own uuid, so revoking it server-side cuts the
+        // tunnel): the one fetched now or, server unreachable, the last good one. No shared fallback config.
+        // The rules are StartPolicy (pure, covered by SelfTest).
         let region = requestedRegion
         let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
-        if let perDevice = fetched.data {
+        let detail = fetched.failure ?? "no response"
+        let lastGood = SharedContainer.readLastGood()
+        let decision = StartPolicy.decide(outcome: fetched.outcome, region: region, detail: detail,
+                                          lastGood: lastGood.map { (fetchedAt: $0.fetchedAt, region: $0.region) },
+                                          now: Date())
+        switch decision {
+        case .useFetched:
+            guard let perDevice = fetched.data else { break }
             let active = fetched.echoedRegion ?? region
             activeRegionID = active
             SharedContainer.writeActiveRegion(id: active, name: fetched.serverRegion ?? active.capitalized)
+            keepLastGood(perDevice, region: active, serverRegion: fetched.serverRegion)
             return try injectClashAPI(into: perDevice)
+        case .useLastGood:
+            guard let lastGood else { break }
+            let hours = Int(Date().timeIntervalSince(lastGood.fetchedAt) / 3600)
+            logger.warning("server unreachable (\(detail, privacy: .public)); using the last good config, \(hours)h old")
+            activeRegionID = lastGood.region
+            SharedContainer.writeActiveRegion(id: lastGood.region, name: lastGood.serverRegion ?? lastGood.region.capitalized)
+            return try injectClashAPI(into: lastGood.config)
+        case .refuse(let code, let message, let clearsLastGood):
+            if clearsLastGood { SharedContainer.clearLastGood() }
+            logger.warning("not connecting: \(message, privacy: .public) (\(detail, privacy: .public))")
+            throw NSError(domain: "rfv.tunnel", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
-        if FollowPolicy.blocksStart(fetched.outcome) {
-            throw NSError(domain: "rfv.tunnel", code: 403,
-                          userInfo: [NSLocalizedDescriptionKey: StopKind.expired.message])
+        throw NSError(domain: "rfv.tunnel", code: 230,
+                      userInfo: [NSLocalizedDescriptionKey: StartPolicy.unreachableMessage])
+    }
+
+    /// Save the raw config (before the clash API goes in) as this device's last good one.
+    private func keepLastGood(_ config: Data, region: String, serverRegion: String?) {
+        if !SharedContainer.writeLastGood(config: config, region: region, serverRegion: serverRegion) {
+            logger.warning("could not save the last good config")
         }
-        guard RuntimeConfigRequest.isDefault(region: region) else {
-            throw NSError(domain: "rfv.tunnel", code: 210,
-                          userInfo: [NSLocalizedDescriptionKey: RuntimeConfigRequest.failureMessage(
-                              region: region, detail: fetched.failure ?? "no response")])
-        }
-        logger.warning("falling back to the bundled Tokyo config: \(fetched.failure ?? "no response", privacy: .public)")
-        guard let url = Bundle.main.url(forResource: "review-tunnel", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else {
-            throw NSError(domain: "rfv.tunnel", code: 200,
-                          userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json not bundled in extension"])
-        }
-        activeRegionID = RuntimeConfigRequest.defaultRegion
-        SharedContainer.writeActiveRegion(id: activeRegionID, name: "Tokyo")
-        return try injectClashAPI(into: data)
     }
 
     /// The region the app asked for in providerConfiguration; missing means the default (Tokyo).
@@ -222,16 +230,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Fetch this device's sing-box config from the backend, using the token the app passed via
-    /// providerConfiguration. On any failure `data` is nil and `outcome` / `failure` say why, so the caller
-    /// can fall back to the bundled config (default region only) or react to expiry.
+    /// providerConfiguration. On any failure `data` is nil and `outcome` / `failure` say why (StartPolicy at
+    /// start, FollowPolicy while connected).
     private func fetchPerDeviceConfigData(region: String, serverDecides: Bool) async -> RuntimeConfigFetch {
         let cfg = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-        guard let token = cfg?["token"] as? String,
-              let base = cfg?["apiBase"] as? String,
-              let url = RuntimeConfigRequest.url(
+        guard let token = cfg?["token"] as? String, !token.isEmpty,
+              let base = cfg?["apiBase"] as? String else {
+            return RuntimeConfigFetch(outcome: .notActivated, failure: "device not activated")
+        }
+        guard let url = RuntimeConfigRequest.url(
                 base: base,
                 region: RuntimeConfigRequest.regionParameter(region: region, serverDecides: serverDecides)) else {
-            return RuntimeConfigFetch(outcome: .network, failure: "device not activated")
+            return RuntimeConfigFetch(outcome: .network, failure: "invalid API address")
         }
         var req = URLRequest(url: url)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -334,8 +344,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         guard !tooSoon, commandServer != nil else { return }
 
-        let fetched = await fetchPerDeviceConfigData(region: requestedRegion, serverDecides: serverDecidesRegion)
+        let region = requestedRegion
+        let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         guard !Task.isCancelled, commandServer != nil else { return }
+        if let data = fetched.data {
+            keepLastGood(data, region: fetched.echoedRegion ?? region, serverRegion: fetched.serverRegion)
+        }
         switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome) {
         case .keep:
             logger.info("region follow (\(reason, privacy: .public)): kept; \(fetched.failure ?? "no change", privacy: .public)")
@@ -372,29 +386,30 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// and stop the tunnel.
     private func stopForServer(_ kind: StopKind) {
         logger.warning("region follow: server says \(kind.rawValue, privacy: .public); stopping the tunnel")
+        SharedContainer.clearLastGood()
         SharedContainer.writeStopReason(kind)
         cancelTunnelWithError(NSError(domain: "rfv.tunnel", code: kind == .expired ? 403 : 401,
                                       userInfo: [NSLocalizedDescriptionKey: kind.message]))
     }
 
-    /// Parse the bundled config JSON, ensure `experimental.clash_api` exists
+    /// Parse the runtime config JSON, ensure `experimental.clash_api` exists
     /// with our external_controller address, and re-serialise.
     ///
-    /// We always force the controller to match the poller; bundled configs
-    /// cannot override this (otherwise a stale port in the bundled JSON
-    /// would silently break stats polling). Idempotency is preserved —
+    /// We always force the controller to match the poller; the server's config
+    /// cannot override this (otherwise a stale port in it would silently break
+    /// stats polling). Idempotency is preserved —
     /// re-setting the same value is a no-op.
     private func injectClashAPI(into data: Data) throws -> String {
         guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NSError(domain: "rfv.tunnel", code: 201,
-                          userInfo: [NSLocalizedDescriptionKey: "review-tunnel.json: root is not an object"])
+                          userInfo: [NSLocalizedDescriptionKey: "runtime config: root is not an object"])
         }
 
         var experimental = (root["experimental"] as? [String: Any]) ?? [:]
         var clashAPI = (experimental["clash_api"] as? [String: Any]) ?? [:]
 
         // Unconditional overwrite — the poller is hardcoded to talk to this
-        // address; any mismatch in the bundled config would silently break it.
+        // address; any mismatch in the config would silently break it.
         clashAPI["external_controller"] = Self.clashAPIController
         // Defense-in-depth: require a Bearer secret on the loopback API.
         clashAPI["secret"] = self.clashSecret

@@ -49,9 +49,6 @@ targets:
           - "**/*.tmp*"
           - "**/*.swp"
           - "**/.backups/**"
-      - path: Tunnel/Resources
-        optional: true
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.redfluent.vpn.tunnel
