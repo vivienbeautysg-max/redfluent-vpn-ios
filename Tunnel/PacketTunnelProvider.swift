@@ -25,8 +25,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var activeRegionID = RuntimeConfigRequest.defaultRegion
     /// The raw config (sorted keys, before the clash API) the running engine was started with.
     private var runningConfig: Data?
-    /// A fetched config the engine failed to load (the previous one was put back): not retried every 5 minutes.
+    /// A fetched config the engine failed to load (the previous one was put back), and when: see FollowPolicy.
     private var rejectedConfig: Data?
+    private var rejectedAt: Date?
+    /// When the engine last reloaded while connected (spaces out reloads for a changed config alone).
+    private var lastReloadAt: Date?
     /// Set once the tunnel is told to stop (any reason): from then on nothing is saved as last good.
     private var stopRequested = false
     #endif
@@ -374,12 +377,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let region = requestedRegion
         let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         guard !Task.isCancelled, commandServer != nil else { return }
-        let (running, rejected) = followLock.withLock { (runningConfig, rejectedConfig) }
+        let now = Date()
+        let (running, rejected, rejectedAt, lastReloadAt) = followLock.withLock {
+            (runningConfig, rejectedConfig, self.rejectedAt, self.lastReloadAt)
+        }
+        let changed = FollowPolicy.configChanged(fetched: fetched.data, running: running)
+        let isRejected = FollowPolicy.isRejected(fetched: fetched.data, rejected: rejected, rejectedAt: rejectedAt, now: now)
         switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome,
-                                   configChanged: FollowPolicy.configChanged(fetched: fetched.data, running: running),
-                                   rejected: fetched.data != nil && fetched.data == rejected) {
+                                   configChanged: changed && FollowPolicy.configReloadDue(lastReloadAt: lastReloadAt, now: now),
+                                   rejected: isRejected) {
         case .keep:
-            logger.info("region follow (\(reason, privacy: .public)): kept; \(fetched.failure ?? "no change", privacy: .public)")
+            let why = fetched.failure ?? (isRejected ? "config failed to load earlier"
+                                          : changed ? "config changed, reload not due yet" : "no change")
+            logger.info("region follow (\(reason, privacy: .public)): kept; \(why, privacy: .public)")
             // Same config as the running engine: refresh the saved one's time (keeps it inside the 30 days).
             if StartPolicy.refreshesLastGood(fetched: fetched.data, running: running),
                let data = fetched.data {
@@ -403,16 +413,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let content = try injectClashAPI(into: data)
             try server.startOrReloadService(content, options: LibboxOverrideOptions())
             activeRegionID = region
-            SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
+            // A stop that came in meanwhile has cleared the region for the app: do not write it back.
+            if !followLock.withLock({ stopRequested }) {
+                SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
+            }
             logger.info("region follow: engine reloaded for \(region, privacy: .public)")
             // The engine runs it now: it becomes the last good config.
             followLock.withLock {
                 runningConfig = data
                 rejectedConfig = nil
+                rejectedAt = nil
+                lastReloadAt = Date()
             }
             keepLastGood(data, region: region, serverRegion: fetched.serverRegion)
         } catch {
-            followLock.withLock { rejectedConfig = data }
+            followLock.withLock {
+                rejectedConfig = data
+                rejectedAt = Date()
+            }
             if let previous = followLock.withLock({ runningConfig }),
                let content = try? injectClashAPI(into: previous),
                (try? server.startOrReloadService(content, options: LibboxOverrideOptions())) != nil {

@@ -93,6 +93,24 @@ enum FollowPolicy {
         return fetched != running
     }
 
+    /// A reload for a changed config alone (same region) happens at most this often: should the server ever answer
+    /// with a config that is not byte-stable (a nonce, a reordered list), the tunnel would otherwise drop its
+    /// connections every 5 minutes. A region change is never held back.
+    static let configReloadGap: TimeInterval = 1800
+    /// A config that failed to load is not tried again for this long (a passing failure gets another try later).
+    static let rejectedFor: TimeInterval = 3600
+
+    static func configReloadDue(lastReloadAt: Date?, now: Date) -> Bool {
+        guard let lastReloadAt else { return true }
+        return now.timeIntervalSince(lastReloadAt) >= configReloadGap
+    }
+
+    /// The fetched config is the one that failed to load, and that was less than `rejectedFor` ago.
+    static func isRejected(fetched: Data?, rejected: Data?, rejectedAt: Date?, now: Date) -> Bool {
+        guard let fetched, let rejected, let rejectedAt, fetched == rejected else { return false }
+        return now.timeIntervalSince(rejectedAt) < rejectedFor
+    }
+
     /// The default network as far as a re-check cares: usable or not, and over which interfaces.
     struct PathSignature: Equatable {
         let satisfied: Bool
