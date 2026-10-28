@@ -24,7 +24,7 @@ enum StopKind: String, Equatable {
 enum FollowAction: Equatable {
     /// Nothing to do (same region, or no usable answer).
     case keep
-    /// The server now assigns another region: hot-reload the engine with the new config.
+    /// The server now assigns another region, or the same region with another config: hot-reload the engine.
     case reload(region: String)
     /// Expired / revoked: stop the tunnel and tell the app.
     case stop(StopKind)
@@ -67,7 +67,12 @@ enum FollowPolicy {
     static func sameRegion(_ a: String, _ b: String) -> Bool { a.lowercased() == b.lowercased() }
 
     /// What to do with the answer of a follow check while `active` is the region the engine runs.
-    static func decide(active: String, outcome: RuntimeConfigOutcome) -> FollowAction {
+    /// `configChanged`: the fetched config is not the one the engine runs (see `configChanged(fetched:running:)`).
+    /// Same region with another config (a new server address, new routing rules) reloads too: otherwise a server
+    /// move or a rule fix only reaches a phone at its next reconnect. `rejected`: the fetched config is the one
+    /// that already failed to load here, so it is not tried again every 5 minutes.
+    static func decide(active: String, outcome: RuntimeConfigOutcome,
+                       configChanged: Bool = false, rejected: Bool = false) -> FollowAction {
         switch outcome {
         case .network, .notActivated:
             return .keep
@@ -75,9 +80,17 @@ enum FollowPolicy {
             if let kind = stopKind(of: outcome) { return .stop(kind) }
             return .keep
         case .config(let region):
-            guard let region, !region.isEmpty, !sameRegion(region, active) else { return .keep }
-            return .reload(region: region)
+            if rejected { return .keep }
+            if let region, !region.isEmpty, !sameRegion(region, active) { return .reload(region: region) }
+            return configChanged ? .reload(region: active) : .keep
         }
+    }
+
+    /// The fetched config differs from the one the engine runs. Either side unknown is no change: never reload
+    /// on a guess. Both are the server's runtimeConfig re-serialised with sorted keys, so equal means same config.
+    static func configChanged(fetched: Data?, running: Data?) -> Bool {
+        guard let fetched, let running else { return false }
+        return fetched != running
     }
 
     /// The default network as far as a re-check cares: usable or not, and over which interfaces.

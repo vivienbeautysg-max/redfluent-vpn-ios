@@ -25,6 +25,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var activeRegionID = RuntimeConfigRequest.defaultRegion
     /// The raw config (sorted keys, before the clash API) the running engine was started with.
     private var runningConfig: Data?
+    /// A fetched config the engine failed to load (the previous one was put back): not retried every 5 minutes.
+    private var rejectedConfig: Data?
     /// Set once the tunnel is told to stop (any reason): from then on nothing is saved as last good.
     private var stopRequested = false
     #endif
@@ -372,11 +374,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let region = requestedRegion
         let fetched = await fetchPerDeviceConfigData(region: region, serverDecides: serverDecidesRegion)
         guard !Task.isCancelled, commandServer != nil else { return }
-        switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome) {
+        let (running, rejected) = followLock.withLock { (runningConfig, rejectedConfig) }
+        switch FollowPolicy.decide(active: activeRegionID, outcome: fetched.outcome,
+                                   configChanged: FollowPolicy.configChanged(fetched: fetched.data, running: running),
+                                   rejected: fetched.data != nil && fetched.data == rejected) {
         case .keep:
             logger.info("region follow (\(reason, privacy: .public)): kept; \(fetched.failure ?? "no change", privacy: .public)")
             // Same config as the running engine: refresh the saved one's time (keeps it inside the 30 days).
-            if StartPolicy.refreshesLastGood(fetched: fetched.data, running: followLock.withLock({ runningConfig })),
+            if StartPolicy.refreshesLastGood(fetched: fetched.data, running: running),
                let data = fetched.data {
                 keepLastGood(data, region: fetched.echoedRegion ?? region, serverRegion: fetched.serverRegion)
             }
@@ -387,23 +392,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// The server now assigns another region: restart the sing-box service with the new config. The tunnel
-    /// itself stays up (same path the official client takes to reload a profile).
+    /// The server now assigns another region, or the same region with another config: restart the sing-box
+    /// service with the new config. The tunnel itself stays up (same path the official client takes to reload a
+    /// profile). If the new config does not load, the running one goes back in and the new one is not retried.
     private func reloadEngine(_ fetched: RuntimeConfigFetch, region: String) {
         guard let data = fetched.data, let server = commandServer else { return }
+        reasserting = true
+        defer { reasserting = false }
         do {
             let content = try injectClashAPI(into: data)
-            reasserting = true
-            defer { reasserting = false }
             try server.startOrReloadService(content, options: LibboxOverrideOptions())
             activeRegionID = region
             SharedContainer.writeActiveRegion(id: region, name: fetched.serverRegion ?? region.capitalized)
             logger.info("region follow: engine reloaded for \(region, privacy: .public)")
             // The engine runs it now: it becomes the last good config.
-            followLock.withLock { runningConfig = data }
+            followLock.withLock {
+                runningConfig = data
+                rejectedConfig = nil
+            }
             keepLastGood(data, region: region, serverRegion: fetched.serverRegion)
         } catch {
-            // The old engine is gone and the new one did not start: stop visibly instead of limping.
+            followLock.withLock { rejectedConfig = data }
+            if let previous = followLock.withLock({ runningConfig }),
+               let content = try? injectClashAPI(into: previous),
+               (try? server.startOrReloadService(content, options: LibboxOverrideOptions())) != nil {
+                logger.error("region follow: new config did not load (\(error.localizedDescription, privacy: .public)); kept the previous one")
+                return
+            }
+            // The old engine is gone and neither the new config nor the previous one started: stop visibly.
             let message = "Could not switch region: \(error.localizedDescription)"
             logger.error("\(message, privacy: .public)")
             SharedContainer.writeStartError(message)
