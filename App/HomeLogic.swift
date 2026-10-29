@@ -57,11 +57,15 @@ enum HomeFormat {
         return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
     }
 
-    /// Used GB: "12.4" (one decimal; "1024" from 1000 GB on); "—" when unknown or not a number.
+    /// Used GB: "12.4" (one decimal; "1024" from 1000 GB on); below 1 GB two decimals ("0.03" — one decimal showed
+    /// 27 MB as "0.0", MAX 2026-10-29), "<0.01" for a little above nothing; "—" when unknown or not a number.
     static func gigabytes(_ value: Double?) -> String {
         guard let value, value.isFinite else { return none }
         let v = max(value, 0)
-        return v < 1000 ? String(format: "%.1f", v) : String(format: "%.0f", v)
+        if v == 0 { return "0.0" }
+        if v < 0.005 { return "<0.01" }
+        if v < 0.995 { return String(format: "%.2f", v) }
+        return v < 999.5 ? String(format: "%.1f", v) : String(format: "%.0f", v)
     }
 
     /// A quota: "100", or "12.5" when it is not whole.

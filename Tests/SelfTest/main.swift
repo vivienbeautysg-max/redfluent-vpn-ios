@@ -1090,6 +1090,9 @@ check(HomeFormat.clock(5077) == "01:24:37" && HomeFormat.clock(0) == "00:00:00" 
       && HomeFormat.clock(.nan) == "00:00:00" && HomeFormat.clock(360_000) == "100:00:00", "connected time")
 check(HomeFormat.gigabytes(12.43) == "12.4" && HomeFormat.gigabytes(nil) == "\u{2014}" && HomeFormat.gigabytes(.nan) == "\u{2014}"
       && HomeFormat.gigabytes(1234.4) == "1234" && HomeFormat.gigabytes(-3) == "0.0", "used GB")
+check(HomeFormat.gigabytes(0.03) == "0.03" && HomeFormat.gigabytes(0.27) == "0.27" && HomeFormat.gigabytes(0.001) == "<0.01"
+      && HomeFormat.gigabytes(0) == "0.0" && HomeFormat.gigabytes(0.999) == "1.0" && HomeFormat.gigabytes(1.04) == "1.0"
+      && HomeFormat.gigabytes(999.7) == "1000", "used GB below 1 GB keeps two decimals (27 MB is not 0.0)")
 check(HomeFormat.quota(100) == "100" && HomeFormat.quota(12.5) == "12.5", "quota")
 check(HomeFormat.bytesAsGB(1_932_735_283) == "1.8 GB" && HomeFormat.bytesAsGB(-1) == "0.0 GB", "bytes -> GB")
 check(HomeFormat.fraction(used: 12.4, quota: 100).map { abs($0 - 0.124) < 1e-9 } == true && HomeFormat.fraction(used: 300, quota: 200) == 1
